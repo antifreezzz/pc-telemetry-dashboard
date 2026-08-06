@@ -29,26 +29,47 @@ firmware/            # Arduino: panel + LVGL + protocol parser
 ### Стек
 
 - **Хост**: Python 3, `psutil`, `pyserial`, опционально `intel_gpu_top` для GPU.
+  Модули: `host/protocol.py` (батч-фрейм + CRC), `host/metrics.py` (сбор),
+  `host/gpu_monitor.py` (фоновый intel_gpu_top).
 - **Прошивка**: PlatformIO + arduino-esp32 2.x (espressif32@^6.5.0), LVGL 8.3,
   Arduino_GFX 1.5.0.
 
-### Протокол (host -> device)
+### Протокол (host -> device) v2
 
-Бинарный поток, кадр начинается с `0xAA`:
+> **Breaking change от v1.** Новый формат (батч-фрейм + CRC-8) реализован
+> одновременно в хосте и прошивке одним PR. Старый хост/старая прошивка
+> между собой НЕ совместимы — обновляй обе стороны вместе.
+
+Один батч-фрейм на тик (вместо 4 одиночных пакетов v1), всё начинается с `0xAA`:
 
 ```
-[0xAA] [len_lo] [len_hi] [type] [payload...]
+[0xAA] [len_lo] [len_hi] [type=0xF1] [TLV...] [crc8]
 ```
 
-| Type | Поле          | Payload                       |
-|------|---------------|-------------------------------|
-| 0x01 | CPU %         | u8                            |
-| 0x02 | RAM           | u8 pct, u32 used_mb, u32 total_mb |
-| 0x03 | GPU %         | u8                            |
-| 0x04 | NET           | u32 rx_kbps, u32 tx_kbps      |
+`len` — длина только `payload` (uint16 LE). `crc8` — CRC-8/ATM (poly 0x07,
+init 0x00, без инверсии) по байтам `[type, payload...]`. Мифрагмент/неверная
+CRC → кадр отбрасывается, приёмник ресинкается на `0xAA`.
 
-Парсер: `firmware/src/protocol.cpp`. State machine: SYNC -> LEN_LO -> LEN_HI ->
-TYPE -> PAYLOAD.
+`payload` = последовательность TLV `[field_id:u8][field_len:u8][data...]`.
+Неизвестные `field_id` пропускаются по `field_len` — протокол экстенсибилен
+без версионирования. Все multi-byte — little-endian. Юниты скоростей — **kB/s**
+(КиБ/с; делим дельту байт на 1024, а не на 1000).
+
+| id | Поле   | Data                                        |
+|----|--------|---------------------------------------------|
+| 0x01 | CPU   | u8 pct, u8[Ncores] per-core                 |
+| 0x02 | RAM   | u8 pct, u32 used_mb, u32 total_mb           |
+| 0x03 | GPU   | u8 pct (255=N/A), u8 vram_pct, u32 vram_used_mb, u32 vram_total_mb |
+| 0x04 | NET   | u32 rx_kB/s, u32 tx_kB/s                    |
+| 0x05 | DISK  | u32 rd_kB/s, u32 wr_kB/s, u8 used_pct       |
+| 0x06 | HEADER| u32 uptime_s, u32 epoch_s, char hostname[24] |
+| 0x07 | PROC  | u8 count, ×[u8 cpu, u16 pid, char name[16]] |
+
+Эталонный энкодер: `host/protocol.py` (функции `pack_frame`, `build_*`).
+Парсер прошивки: `firmware/src/protocol.cpp` (state machine
+SYNC -> LEN_LO -> LEN_HI -> TYPE -> PAYLOAD -> CSUM). Поле CRC реализовано,
+`host/protocol.py::crc8` и `firmware crc8_step` байт-в-байт совместимы
+(check: `crc8(\\xF1) == 0xD9`).
 
 ## Сборка и запуск
 
@@ -57,10 +78,24 @@ TYPE -> PAYLOAD.
 ```bash
 cd host/
 pip install -r requirements.txt
-python3 host.py           # шлёт CPU/RAM/GPU/NET в /dev/ttyUSB0 @115200
+python3 host.py           # шлёт батч в /dev/ttyUSB0 @115200
 ```
 
 Аргументы: `--port`, `--baud`, `--interval` (по умолчанию 0.5 с).
+
+### GPU (intel_gpu_top)
+
+Хост держит **один** постоянный процесс `intel_gpu_top -J -s 500` в фоновом
+потоке (`host/gpu_monitor.py::IntelGpuMonitor`) — больше НЕ спавнит сублистоит
+на каждый тик. Оттуда берутся: загрузка Render/3D engine-class (%) и занятость
+**видеопамяти** A770 (регион `local` → VRAM used/total MB). Если GPU недоступен
+или процесс умер — пакет уходит с `pct=255` (N/A), прошивка показывает «--»,
+а не 0%.
+
+Требуется привилегии (иначе GPU вернёт N/A):
+```bash
+sudo setcap cap_perfmon,cap_sys_admin+ep /usr/bin/intel_gpu_top
+```
 
 ### Прошивка
 
@@ -77,18 +112,28 @@ pio run -t upload         # собирает и заливает в /dev/ttyUSB0
 
 ### Работает
 
-- Поднимается экран, виден тёмный UI (карточки CPU/GPU/RAM/NET).
-- `host.py` шлёт пакеты -> ESP32 принимает -> парсер выдёргивает значения ->
-  `ui_set_*` обновляет виджеты.
-- CPU-arc и RAM-bar показывают реальные значения с хоста.
-- NET-чарт рисует серию (добавлен `lv_chart_add_series`).
+- Поднимается экран, виден тёмный UI (карточки CPU/GPU/RAM/NET + шапка + DISK).
+- `host.py` шлёт один батч-фрейм -> ESP32 парсит TLV + CRC -> `ui_set_*`
+  обновляет виджеты.
+- **Header**: hostname, аптайм `up D HH:MM:SS`, живые часы `HH:MM:SS`
+  (из epoch хоста + локальный счётчик), FPS (по фактическим флашам), кнопка PROC.
+- **CPU**: arc + % внутри + мини-бары по ядрам.
+- **GPU**: arc + % (+ «--» и серый arc при N/A) + VRAM-бар и `VRAM x / y MB`.
+- **RAM**: bar + `used / total MB`. **DISK**: полоса used% + `rd/wr MB/s`.
+- **NET**: чарт с двумя сериями RX/TX (cyan/green), Y 0..512 kB/s.
+- **PROC overlay** (фуллскрин): топ процессов по CPU; открывается кнопкой
+  PROC / тапом по hostname; внутри — слайдер яркости backlight (ledc, 0..255).
+- **Touch GT911** подключён к LVGL (indev pointer) — кнопки/слайдер работают.
+- Double-buffer LVGL (2×480×200×2 ≈ 384 КБ в PSRAM; при нехватке — fallback
+  на single buffer).
 - Подсветка через ШИМ на GPIO 38.
 
 ### Не работает / TODO
 
-- **Touch**: GT911 на SDA=19/SCL=45, но RST/INT не подключены напрямую
-  (на 4848S040C RST через IO expander TCA9554 EXIO0, не инициализирован).
-  Пока что тач не задействован в UI.
+- **Таймзона часов**: часы в шапке идут по UTC (epoch без офсета). Если нужен
+  локальный пояс — передавать офсет в HEADER-поле (нет в протоколе пока).
+- NET-чарт жёстко ограничен 512 kB/s (clamp); при стабильно больших
+  скоростях масштаб стоит сделать динамическим.
 - **Цвета после ухода от 0x21**: инверсия убрана (reference-конфиг работает
   без неё). Если на твоём экземпляре появятся полосы — вернуть `0x21` в
   `panel.cpp` и компенсировать палитру в `ui.cpp`.
@@ -221,8 +266,9 @@ RGB-тайминги (hsync_polarity=1, vsync_polarity=1, pclk_active_neg=0):
    то есть в `platformio.ini` стоит `-DARDUINO_USB_CDC_ON_BOOT=0`
    (`ARDUINO_USB_MODE=0`). Нативный CDC (GPIO 19/20) до USB-C не доходит —
    там CH340. Хост: `python3 host.py --port /dev/ttyUSB0 --baud 115200`.
-   Проверка приёма: собрать с `-DPROTO_DEBUG` (прошивка печатает `s:N a:M`
-   и `pkt t=.. len=..` раз в секунду) и смотреть через `host/test.py`.
+   Проверка приёма: собрать с `-DPROTO_DEBUG` (прошивка печатает `s:N r:M a:K`
+   — принято/отброшено/в буфере — и `pkt t=F1 len=.. crc ok` раз в секунду)
+   и смотреть через `host/test.py` (шлёт батч-фреймы через `host/protocol.py`).
 
 4. **Полосы / рассинхрон панели** — тайминги vsync/porch в `panel.cpp`
    (должно быть 10/8/20). Если рассинхрон остаётся — вернуть
