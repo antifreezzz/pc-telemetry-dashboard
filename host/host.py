@@ -1,101 +1,40 @@
 #!/usr/bin/env python3
-"""ESP32-4848S040C PC dashboard host.
+"""ESP32-4848S040C PC dashboard host (protocol v2).
 
-Collects CPU/GPU/RAM/NET metrics and sends them as a binary stream
-to the ESP32 over UART0 (CH340 on Linux: /dev/ttyUSB0).
-
-Protocol (host -> device):
-    [0xAA] [len_lo] [len_hi] [type] [payload...]
-
-Types:
-    0x01 CPU pct          payload: u8
-    0x02 RAM              payload: u8 pct, u32 used_mb, u32 total_mb
-    0x03 GPU pct          payload: u8
-    0x04 NET              payload: u32 rx_kbps, u32 tx_kbps
+Collects CPU/GPU/RAM/NET/DISK/PROC metrics and sends them as one batched
+frame (header + TLV payload + CRC-8) over UART0 (CH340 on Linux:
+/dev/ttyUSB0). The GPU is read continuously by a background
+IntelGpuMonitor subprocess.
 """
 
 import argparse
-import json
-import socket
-import struct
-import subprocess
-import sys
 import time
 
 import psutil
 import serial
 
-SYNC = 0xAA
+from . import metrics
+from .gpu_monitor import IntelGpuMonitor
+from .protocol import (
+    pack_frame,
+    FIELD_CPU,
+    FIELD_RAM,
+    FIELD_GPU,
+    FIELD_NET,
+    FIELD_DISK,
+    FIELD_HEADER,
+    FIELD_PROC,
+    build_cpu,
+    build_ram,
+    build_gpu,
+    build_net,
+    build_disk,
+    build_header,
+    build_proc,
+)
+
 DEFAULT_PORT = "/dev/ttyUSB0"
 DEFAULT_BAUD = 115200
-
-
-def get_cpu_pct() -> int:
-    return int(psutil.cpu_percent(interval=None))
-
-
-def get_ram() -> tuple[int, int, int]:
-    mem = psutil.virtual_memory()
-    return (
-        int(mem.percent),
-        mem.used // (1024 * 1024),
-        mem.total // (1024 * 1024),
-    )
-
-
-def get_gpu_pct() -> int:
-    """Read Intel GPU utilization via intel_gpu_top JSON mode.
-
-    Requires CAP_PERFMON; install with:
-        sudo setcap cap_perfmon,cap_sys_admin+ep /usr/bin/intel_gpu_top
-    """
-    try:
-        out = subprocess.check_output(
-            ["intel_gpu_top", "-J", "-n", "1", "-s", "500"],
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
-        return -1
-    try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
-        return -1
-    try:
-        engines = data["devices"][0]["engine-classes"]
-        for eng in engines:
-            if "Render" in eng.get("name", "") or "3D" in eng.get("name", ""):
-                return int(eng["busy"])
-        if engines:
-            return int(engines[0]["busy"])
-        return 0
-    except (KeyError, IndexError, TypeError):
-        return -1
-
-
-def net_kbps(delta_bytes: int, interval: float) -> int:
-    """Kbps rate clamped to >= 0. psutil counters can wrap/reset making the
-    delta negative, which would crash struct.pack('<I', -n) on the MCU link."""
-    return max(0, int(delta_bytes / interval / 1024))
-
-
-def pack_net_kbps(rx_delta: int, rx_interval: float, tx_delta: int, tx_interval: float):
-    return net_kbps(rx_delta, rx_interval), net_kbps(tx_delta, tx_interval)
-
-
-def get_net_kbps(sample_interval: float = 0.5) -> tuple[int, int]:
-    n1 = psutil.net_io_counters()
-    time.sleep(sample_interval)
-    n2 = psutil.net_io_counters()
-    rx_delta = n2.bytes_recv - n1.bytes_recv
-    tx_delta = n2.bytes_sent - n1.bytes_sent
-    return pack_net_kbps(rx_delta, sample_interval, tx_delta, sample_interval)
-
-
-def send_packet(ser: serial.Serial, pkt_type: int, payload: bytes) -> None:
-    length = len(payload)
-    header = bytes([SYNC, length & 0xFF, (length >> 8) & 0xFF, pkt_type])
-    ser.write(header + payload)
 
 
 def open_serial(port: str, baud: int) -> serial.Serial:
@@ -106,7 +45,6 @@ def open_serial(port: str, baud: int) -> serial.Serial:
                 rtscts=False, xonxoff=False, dsrdtr=False,
             )
             # CH340 quirk: open sets DTR/RTS HIGH which holds ESP32 in reset.
-            # Release immediately so ESP32 boots app.
             s.dtr = False
             s.rts = False
             print(f"[host] connected to {port} @ {baud}", flush=True)
@@ -116,36 +54,74 @@ def open_serial(port: str, baud: int) -> serial.Serial:
             time.sleep(2)
 
 
+def build_frame(snaps: dict, interval: float) -> bytes:
+    fields = [
+        (FIELD_CPU, build_cpu(snaps["cpu"][0], snaps["cpu"][1])),
+        (FIELD_RAM, build_ram(*snaps["ram"])),
+        (FIELD_GPU, build_gpu(*snaps["gpu"])),
+        (FIELD_NET, build_net(*snaps["net"])),
+        (FIELD_DISK, build_disk(*snaps["disk"])),
+        (FIELD_HEADER, build_header(*snaps["header"])),
+        (FIELD_PROC, build_proc(snaps["proc"])),
+    ]
+    return pack_frame(fields)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default=DEFAULT_PORT)
     ap.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     ap.add_argument("--interval", type=float, default=0.5,
-                    help="seconds between packets")
+                    help="seconds between frames")
     args = ap.parse_args()
 
     ser = open_serial(args.port, args.baud)
+    monitor = IntelGpuMonitor()
+    net_prev = psutil.net_io_counters()
+    disk_prev = psutil.disk_io_counters()
+    prev_t = time.monotonic()
+
     try:
         while True:
-            cpu = get_cpu_pct()
-            ram_pct, ram_used, ram_total = get_ram()
-            gpu = get_gpu_pct()
-            rx_kbps, tx_kbps = get_net_kbps(sample_interval=args.interval)
+            now_t = time.monotonic()
+            interval = max(0.001, now_t - prev_t)
+            prev_t = now_t
 
-            send_packet(ser, 0x01, bytes([cpu]))
-            send_packet(ser, 0x02, struct.pack("<BII", ram_pct, ram_used, ram_total))
-            if gpu >= 0:
-                send_packet(ser, 0x03, bytes([gpu]))
-            send_packet(ser, 0x04, struct.pack("<II", rx_kbps, tx_kbps))
+            net_now = psutil.net_io_counters()
+            disk_now = psutil.disk_io_counters() or None
+
+            snaps = {
+                "cpu": metrics.cpu_snapshot(),
+                "ram": metrics.ram_snapshot(),
+                "gpu": metrics.gpu_snapshot(monitor),
+                "net": metrics.net_snapshot(net_prev, net_now, interval),
+                "disk": metrics.disk_snapshot(disk_prev, disk_now, interval),
+                "header": metrics.header_snapshot(),
+                "proc": metrics.proc_snapshot(),
+            }
+            net_prev = net_now
+            disk_prev = disk_now
+
+            ser.write(build_frame(snaps, interval))
+
+            cpu = snaps["cpu"][0]
+            ram_pct, ram_used, ram_total = snaps["ram"]
+            gpu, vram_pct, vram_used, vram_total = snaps["gpu"]
+            rx, tx = snaps["net"]
+            rd, wr, used_pct = snaps["disk"]
 
             print(
                 f"[host] cpu={cpu:3d}% ram={ram_used:5d}/{ram_total:5d} MB "
-                f"gpu={gpu:3d}% net rx={rx_kbps:5d} tx={tx_kbps:5d} kbps",
+                f"gpu={gpu:3d}% vram={vram_used:4d}/{vram_total:4d} MB "
+                f"net rx={rx:5d} tx={tx:5d} KiB/s "
+                f"disk rd={rd:5d} wr={wr:5d} KiB/s used={used_pct:3d}%",
                 flush=True,
             )
+            time.sleep(interval)
     except KeyboardInterrupt:
         print("\n[host] exiting", flush=True)
     finally:
+        monitor.stop()
         ser.close()
 
 

@@ -1,51 +1,77 @@
 #!/usr/bin/env python3
-"""Combined test: open serial, send host.py data, read ESP32 debug, all in one process."""
+"""Combined integration test: open serial, send protocol v2 batched frames,
+read ESP32 debug output, all in one process.
+
+The old firmware can't parse v2 frames, so it may fail to react; that is
+fine for this script, which is meant to validate the host send path and the
+ESP32 debug echo once the firmware is upgraded. This script is standalone
+test code: it does not require the updated firmware to be flashed to run.
+"""
 
 import threading
 import time
-import struct
+
 import psutil
 import serial
-from host import pack_net_kbps
 
-SYNC = 0xAA
+from . import metrics
+from .gpu_monitor import IntelGpuMonitor
+from .protocol import (
+    pack_frame, build_cpu, build_ram, build_gpu, build_net, build_disk,
+    build_header, build_proc,
+    FIELD_CPU, FIELD_RAM, FIELD_GPU, FIELD_NET, FIELD_DISK, FIELD_HEADER,
+    FIELD_PROC,
+)
+
 PORT = "/dev/ttyUSB0"
 BAUD = 115200
 DURATION = 20
 
 
-def sender(ser, stop):
-    """Send CPU/RAM/NET packets every 500ms."""
+def send_one_frame(ser, snaps):
+    fields = [
+        (FIELD_CPU, build_cpu(snaps["cpu"][0], snaps["cpu"][1])),
+        (FIELD_RAM, build_ram(*snaps["ram"])),
+        (FIELD_GPU, build_gpu(*snaps["gpu"])),
+        (FIELD_NET, build_net(*snaps["net"])),
+        (FIELD_DISK, build_disk(*snaps["disk"])),
+        (FIELD_HEADER, build_header(*snaps["header"])),
+        (FIELD_PROC, build_proc(snaps["proc"])),
+    ]
+    ser.write(pack_frame(fields))
+
+
+def sender(ser, stop, monitor):
+    """Build and send one batched v2 frame every 500ms."""
+    net_prev = psutil.net_io_counters()
+    disk_prev = psutil.disk_io_counters()
     seq = 0
     while not stop.is_set():
         try:
-            cpu = int(psutil.cpu_percent(interval=None))
-            mem = psutil.virtual_memory()
-            ram_pct = int(mem.percent)
-            ram_used = mem.used // (1024 * 1024)
-            ram_total = mem.total // (1024 * 1024)
-            n1 = psutil.net_io_counters()
-            time.sleep(0.4)
-            n2 = psutil.net_io_counters()
-            rx, tx = host.pack_net_kbps(
-                n2.bytes_recv - n1.bytes_recv, 0.4,
-                n2.bytes_sent - n1.bytes_sent, 0.4,
-            )
-
-            # type 0x01 CPU
-            ser.write(bytes([SYNC, 1, 0, 0x01, cpu]))
-            # type 0x02 RAM
-            ram_payload = struct.pack("<BII", ram_pct, ram_used, ram_total)
-            ser.write(bytes([SYNC, len(ram_payload), 0, 0x02]) + ram_payload)
-            # type 0x04 NET
-            net_payload = struct.pack("<II", rx, tx)
-            ser.write(bytes([SYNC, len(net_payload), 0, 0x04]) + net_payload)
+            interval = 0.5
+            net_now = psutil.net_io_counters()
+            disk_now = psutil.disk_io_counters()
+            snaps = {
+                "cpu": metrics.cpu_snapshot(),
+                "ram": metrics.ram_snapshot(),
+                "gpu": metrics.gpu_snapshot(monitor),
+                "net": metrics.net_snapshot(net_prev, net_now, interval),
+                "disk": metrics.disk_snapshot(disk_prev, disk_now, interval),
+                "header": metrics.header_snapshot(),
+                "proc": metrics.proc_snapshot(),
+            }
+            send_one_frame(ser, snaps)
+            net_prev = net_now
+            disk_prev = disk_now
 
             seq += 1
-            print(f"[tx] seq={seq} cpu={cpu} ram={ram_used}/{ram_total} rx={rx} tx={tx}", flush=True)
+            cpu = snaps["cpu"][0]
+            rx, tx = snaps["net"]
+            print(f"[tx] seq={seq} cpu={cpu} rx={rx} tx={tx}", flush=True)
         except Exception as e:
             print(f"[tx] error: {e}", flush=True)
             break
+        time.sleep(0.5)
 
 
 def reader(ser, stop):
@@ -70,8 +96,9 @@ def main():
     s.rts = False
     print(f"[main] opened {PORT} @ {BAUD}", flush=True)
 
+    monitor = IntelGpuMonitor()
     stop = threading.Event()
-    t_send = threading.Thread(target=sender, args=(s, stop), daemon=True)
+    t_send = threading.Thread(target=sender, args=(s, stop, monitor), daemon=True)
     t_read = threading.Thread(target=reader, args=(s, stop), daemon=True)
     t_send.start()
     t_read.start()
@@ -79,6 +106,7 @@ def main():
     time.sleep(DURATION)
     stop.set()
     time.sleep(0.5)
+    monitor.stop()
     s.close()
     print("[main] done", flush=True)
 
