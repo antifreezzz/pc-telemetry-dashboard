@@ -1,6 +1,10 @@
 #include "protocol.h"
 #include "ui.h"
 
+volatile uint32_t g_epoch_sec = 0;
+volatile uint32_t g_uptime_sec = 0;
+char g_hostname[24] = {0};
+
 enum State {
     ST_SYNC,
     ST_LEN_LO,
