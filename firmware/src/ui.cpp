@@ -18,6 +18,16 @@ static void my_disp_flush(lv_disp_drv_t *d, const lv_area_t *a, lv_color_t *c)
     int h = a->y2 - a->y1 + 1;
     gfx->draw16bitRGBBitmap(a->x1, a->y1, (uint16_t *)&c->full, w, h);
     lv_disp_flush_ready(d);
+#ifdef PROTO_DEBUG
+    static uint32_t flush_cnt = 0;
+    static uint32_t last_rep = 0;
+    flush_cnt++;
+    uint32_t now = millis();
+    if (now - last_rep >= 1000) {
+        Serial.printf("FLUSH %u area=%d,%u %dx%d\n", flush_cnt, a->x1, a->y1, w, h);
+        last_rep = now;
+    }
+#endif
 }
 
 static lv_style_t style_card;
@@ -158,3 +168,4 @@ void ui_set_net(uint32_t rx_kbps, uint32_t tx_kbps)
     if (v > 100) v = 100;
     lv_chart_set_next_value(chart_net, lv_chart_get_series_next(chart_net, NULL), v);
 }
+
