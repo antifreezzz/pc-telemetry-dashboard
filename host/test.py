@@ -6,6 +6,7 @@ import time
 import struct
 import psutil
 import serial
+from host import pack_net_kbps
 
 SYNC = 0xAA
 PORT = "/dev/ttyUSB0"
@@ -26,8 +27,10 @@ def sender(ser, stop):
             n1 = psutil.net_io_counters()
             time.sleep(0.4)
             n2 = psutil.net_io_counters()
-            rx = int((n2.bytes_recv - n1.bytes_recv) / 0.4 / 1024)
-            tx = int((n2.bytes_sent - n1.bytes_sent) / 0.4 / 1024)
+            rx, tx = host.pack_net_kbps(
+                n2.bytes_recv - n1.bytes_recv, 0.4,
+                n2.bytes_sent - n1.bytes_sent, 0.4,
+            )
 
             # type 0x01 CPU
             ser.write(bytes([SYNC, 1, 0, 0x01, cpu]))

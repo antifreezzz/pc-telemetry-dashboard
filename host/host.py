@@ -73,13 +73,23 @@ def get_gpu_pct() -> int:
         return -1
 
 
+def net_kbps(delta_bytes: int, interval: float) -> int:
+    """Kbps rate clamped to >= 0. psutil counters can wrap/reset making the
+    delta negative, which would crash struct.pack('<I', -n) on the MCU link."""
+    return max(0, int(delta_bytes / interval / 1024))
+
+
+def pack_net_kbps(rx_delta: int, rx_interval: float, tx_delta: int, tx_interval: float):
+    return net_kbps(rx_delta, rx_interval), net_kbps(tx_delta, tx_interval)
+
+
 def get_net_kbps(sample_interval: float = 0.5) -> tuple[int, int]:
     n1 = psutil.net_io_counters()
     time.sleep(sample_interval)
     n2 = psutil.net_io_counters()
-    rx_bps = (n2.bytes_recv - n1.bytes_recv) / sample_interval
-    tx_bps = (n2.bytes_sent - n1.bytes_sent) / sample_interval
-    return int(rx_bps / 1024), int(tx_bps / 1024)
+    rx_delta = n2.bytes_recv - n1.bytes_recv
+    tx_delta = n2.bytes_sent - n1.bytes_sent
+    return pack_net_kbps(rx_delta, sample_interval, tx_delta, sample_interval)
 
 
 def send_packet(ser: serial.Serial, pkt_type: int, payload: bytes) -> None:
