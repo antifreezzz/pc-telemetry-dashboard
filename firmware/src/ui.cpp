@@ -476,7 +476,7 @@ void ui_init(int w, int h)
 
     // ---------------- touch indev ----------------
     touch_init();  // (re)initializes the touch chip so this TU's static instance is ready
-    lv_indev_drv_t indev_drv;
+    static lv_indev_drv_t indev_drv;  // must outlive ui_init: lv_indev_drv_register keeps a pointer
     lv_indev_drv_init(&indev_drv);
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.read_cb = indev_read_cb;
