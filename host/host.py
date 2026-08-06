@@ -8,14 +8,18 @@ IntelGpuMonitor subprocess.
 """
 
 import argparse
+import os
+import sys
 import time
 
 import psutil
 import serial
 
-from . import metrics
-from .gpu_monitor import IntelGpuMonitor
-from .protocol import (
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from host import metrics
+from host.gpu_monitor import IntelGpuMonitor
+from host.protocol import (
     pack_frame,
     FIELD_CPU,
     FIELD_RAM,

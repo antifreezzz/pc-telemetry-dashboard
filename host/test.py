@@ -8,15 +8,19 @@ ESP32 debug echo once the firmware is upgraded. This script is standalone
 test code: it does not require the updated firmware to be flashed to run.
 """
 
+import os
+import sys
 import threading
 import time
 
 import psutil
 import serial
 
-from . import metrics
-from .gpu_monitor import IntelGpuMonitor
-from .protocol import (
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from host import metrics
+from host.gpu_monitor import IntelGpuMonitor
+from host.protocol import (
     pack_frame, build_cpu, build_ram, build_gpu, build_net, build_disk,
     build_header, build_proc,
     FIELD_CPU, FIELD_RAM, FIELD_GPU, FIELD_NET, FIELD_DISK, FIELD_HEADER,

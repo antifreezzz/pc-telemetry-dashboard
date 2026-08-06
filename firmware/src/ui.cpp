@@ -9,7 +9,6 @@
 static lv_disp_draw_buf_t draw_buf;
 static lv_disp_drv_t disp_drv;
 static lv_color_t *buf1 = NULL;
-static lv_color_t *buf2 = NULL;
 
 // ---------- colours ----------
 static const lv_color_t C_BG = lv_color_hex(0x000000);
@@ -241,19 +240,10 @@ void ui_init(int w, int h)
     lv_init();
 
     buf1 = (lv_color_t *)heap_caps_malloc(sizeof(lv_color_t) * w * 200, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    buf2 = (lv_color_t *)heap_caps_malloc(sizeof(lv_color_t) * w * 200, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (buf1 && buf2) {
-        lv_disp_draw_buf_init(&draw_buf, buf1, buf2, w * 200);
-    } else {
-        if (buf2) {
-            heap_caps_free(buf2);
-            buf2 = NULL;
-        }
-        if (!buf1) {
-            buf1 = (lv_color_t *)heap_caps_malloc(sizeof(lv_color_t) * w * 200, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        }
-        lv_disp_draw_buf_init(&draw_buf, buf1, NULL, w * 200);
+    if (!buf1) {
+        buf1 = (lv_color_t *)malloc(sizeof(lv_color_t) * w * 200);
     }
+    lv_disp_draw_buf_init(&draw_buf, buf1, NULL, w * 200);
 
     lv_disp_drv_init(&disp_drv);
     disp_drv.hor_res = w;
@@ -397,7 +387,7 @@ void ui_init(int w, int h)
     lv_obj_t *net = make_card(scr, margin + card_w + gap, top + card_h + gap, card_w, card_h, "NET");
     chart_net = lv_chart_create(net);
     lv_obj_set_size(chart_net, card_w - 30, card_h - 78);
-    lv_obj_align(chart_net, LV_ALIGN_CENTER, 0, -12);
+    lv_obj_align(chart_net, LV_ALIGN_CENTER, 0, 10);
     lv_chart_set_type(chart_net, LV_CHART_TYPE_LINE);
     lv_chart_set_range(chart_net, LV_CHART_AXIS_PRIMARY_Y, 0, 512);
     lv_chart_set_point_count(chart_net, 60);
@@ -411,12 +401,12 @@ void ui_init(int w, int h)
     lbl_rx = lv_label_create(net);
     lv_label_set_text(lbl_rx, "RX --");
     set_label_font(lbl_rx, &lv_font_montserrat_12, C_CYAN);
-    lv_obj_align(lbl_rx, LV_ALIGN_TOP_LEFT, 4, -2);
+    lv_obj_align(lbl_rx, LV_ALIGN_TOP_LEFT, 6, 24);
 
     lbl_tx = lv_label_create(net);
     lv_label_set_text(lbl_tx, "TX --");
     set_label_font(lbl_tx, &lv_font_montserrat_12, C_GREEN);
-    lv_obj_align(lbl_tx, LV_ALIGN_TOP_RIGHT, -4, -2);
+    lv_obj_align(lbl_tx, LV_ALIGN_TOP_RIGHT, -6, 24);
 
     // ---------------- disk strip ----------------
     lv_obj_t *disk = make_card(scr, margin, 480 - 56, w - 2 * margin, 46, "DISK");
