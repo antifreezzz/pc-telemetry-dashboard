@@ -34,11 +34,8 @@ void setup()
 
 void loop()
 {
-    int16_t x, y;
-    if (touch_read(x, y)) {
-        Serial.printf("touch %d %d\n", x, y);
-    }
+    touch_poll();        // poll sensor every iteration (~5 ms), independent of LVGL
     protocol_poll();
-    lv_timer_handler();
+    lv_timer_handler();  // consumes the cached, debounced touch state
     delay(5);
 }

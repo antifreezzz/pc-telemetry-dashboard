@@ -79,6 +79,8 @@ static lv_style_t style_card;
 static lv_style_t style_arc_bg;
 static lv_style_t style_arc_indic;
 static lv_style_t style_caption;
+static lv_style_t style_btn;
+static lv_style_t style_btn_pr;
 
 static void my_disp_flush(lv_disp_drv_t *d, const lv_area_t *a, lv_color_t *c)
 {
@@ -117,6 +119,20 @@ static void style_init()
 
     lv_style_set_text_color(&style_caption, C_MUTED);
     lv_style_set_text_font(&style_caption, &lv_font_montserrat_14);
+
+    // tappable buttons: wide rounded target, subtle border, bright feedback on press
+    lv_style_set_bg_color(&style_btn, C_CARD);
+    lv_style_set_bg_opa(&style_btn, LV_OPA_COVER);
+    lv_style_set_radius(&style_btn, 12);
+    lv_style_set_border_width(&style_btn, 1);
+    lv_style_set_border_color(&style_btn, C_ARC_BG);
+    lv_style_set_pad_hor(&style_btn, 12);
+    lv_style_set_text_color(&style_btn, C_MUTED);
+
+    lv_style_set_bg_color(&style_btn_pr, C_CYAN);
+    lv_style_set_border_color(&style_btn_pr, C_CYAN);
+    lv_style_set_text_color(&style_btn_pr, C_BG);
+    lv_style_set_translate_y(&style_btn_pr, 1);
 }
 
 static lv_obj_t *make_card(lv_obj_t *parent, int x, int y, int w, int h, const char *caption)
@@ -153,7 +169,7 @@ static void fmt_uptime(char *buf, size_t sz, uint32_t sec)
 
 static void fmt_clock(char *buf, size_t sz, uint32_t epoch)
 {
-    uint32_t sec = epoch % 86400;
+    uint32_t sec = (epoch + 3 * 3600) % 86400;
     uint32_t h = sec / 3600;
     uint32_t m = (sec % 3600) / 60;
     uint32_t s = sec % 60;
@@ -222,6 +238,8 @@ static void ui_periodic(lv_timer_t *t)
 }
 
 // ---------- touch indev ----------
+// touch_read() returns the debounced cached state filled by touch_poll() in the
+// main loop, so the LVGL timer never blocks on I2C/GT911.
 static void indev_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
 {
     int16_t x, y;
@@ -271,27 +289,27 @@ void ui_init(int w, int h)
     lbl_clock = lv_label_create(scr);
     lv_label_set_text(lbl_clock, "--:--:--");
     set_label_font(lbl_clock, &lv_font_montserrat_16, C_TEXT);
-    lv_obj_align(lbl_clock, LV_ALIGN_TOP_RIGHT, -72, 5);
+    lv_obj_align(lbl_clock, LV_ALIGN_TOP_RIGHT, -112, 5);
 
     lbl_fps = lv_label_create(scr);
     lv_label_set_text(lbl_fps, "FPS --");
     set_label_font(lbl_fps, &lv_font_montserrat_14, C_DIM);
-    lv_obj_align(lbl_fps, LV_ALIGN_TOP_RIGHT, -72, 26);
+    lv_obj_align(lbl_fps, LV_ALIGN_TOP_RIGHT, -112, 26);
 
     btn_proc = lv_btn_create(scr);
-    lv_obj_set_size(btn_proc, 58, 32);
+    lv_obj_set_size(btn_proc, 96, 38);
     lv_obj_align(btn_proc, LV_ALIGN_TOP_RIGHT, -6, 5);
-    lv_obj_set_style_bg_color(btn_proc, C_CARD, 0);
-    lv_obj_set_style_radius(btn_proc, 10, 0);
-    lv_obj_add_event_cb(btn_proc, ovl_toggle_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_style(btn_proc, &style_btn, LV_PART_MAIN);
+    lv_obj_add_style(btn_proc, &style_btn_pr, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_event_cb(btn_proc, ovl_toggle_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_t *btn_lbl = lv_label_create(btn_proc);
     lv_label_set_text(btn_lbl, "PROC");
     set_label_font(btn_lbl, &lv_font_montserrat_14, C_MUTED);
     lv_obj_center(btn_lbl);
 
     // header hostname/left area also toggles the overlay
-    lv_obj_add_event_cb(lbl_hostname, ovl_toggle_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(lbl_uptime, ovl_toggle_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(lbl_hostname, ovl_toggle_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(lbl_uptime, ovl_toggle_cb, LV_EVENT_PRESSED, NULL);
 
     // ---------------- 2x2 grid ----------------
     int top = 52;
@@ -464,11 +482,11 @@ void ui_init(int w, int h)
     lv_obj_set_style_bg_color(ovl_slider, C_TEXT, LV_PART_KNOB);
 
     lv_obj_t *ovl_close = lv_btn_create(ovl_proc);
-    lv_obj_set_size(ovl_close, 58, 32);
+    lv_obj_set_size(ovl_close, 96, 38);
     lv_obj_align(ovl_close, LV_ALIGN_TOP_RIGHT, -6, 8);
-    lv_obj_set_style_bg_color(ovl_close, C_CARD, 0);
-    lv_obj_set_style_radius(ovl_close, 10, 0);
-    lv_obj_add_event_cb(ovl_close, ovl_toggle_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_style(ovl_close, &style_btn, LV_PART_MAIN);
+    lv_obj_add_style(ovl_close, &style_btn_pr, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_event_cb(ovl_close, ovl_toggle_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_t *close_lbl = lv_label_create(ovl_close);
     lv_label_set_text(close_lbl, "CLOSE");
     set_label_font(close_lbl, &lv_font_montserrat_14, C_MUTED);

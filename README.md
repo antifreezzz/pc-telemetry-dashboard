@@ -28,9 +28,9 @@ firmware/            # Arduino: panel + LVGL + protocol parser
 
 ### Стек
 
-- **Хост**: Python 3, `psutil`, `pyserial`, опционально `intel_gpu_top` для GPU.
+- **Хост**: Python 3, `psutil`, `pyserial`.
   Модули: `host/protocol.py` (батч-фрейм + CRC), `host/metrics.py` (сбор),
-  `host/gpu_monitor.py` (фоновый intel_gpu_top).
+  `host/gpu_monitor.py` (GPU из DRM fdinfo, без root).
 - **Прошивка**: PlatformIO + arduino-esp32 2.x (espressif32@^6.5.0), LVGL 8.3,
   Arduino_GFX 1.5.0.
 
@@ -83,19 +83,18 @@ python3 host.py           # шлёт батч в /dev/ttyUSB0 @115200
 
 Аргументы: `--port`, `--baud`, `--interval` (по умолчанию 0.5 с).
 
-### GPU (intel_gpu_top)
+### GPU (DDR-drive, без root)
 
-Хост держит **один** постоянный процесс `intel_gpu_top -J -s 500` в фоновом
-потоке (`host/gpu_monitor.py::IntelGpuMonitor`) — больше НЕ спавнит сублистоит
-на каждый тик. Оттуда берутся: загрузка Render/3D engine-class (%) и занятость
-**видеопамяти** A770 (регион `local` → VRAM used/total MB). Если GPU недоступен
-или процесс умер — пакет уходит с `pct=255` (N/A), прошивка показывает «--»,
-а не 0%.
+ГП работает через DRM `fdinfo`: фоновый поток `host/gpu_monitor.py::IntelGpuMonitor`
+раз в 0.5 с сканирует `/proc/<pid>/fdinfo/<fd>` на i915-клиентов и берёт:
+- **занятость VRAM**: сумма `drm-resident-local0` по уникальным (pid, drm-client-id);
+  total — prefetchable PCI MEM BAR из `/sys/bus/pci/devices/0000:03:00.0/resource`;
+- **загрузку %**: дельты `drm-engine-render` + `drm-engine-compute` (Render/3D
+  класс) между тиками, нормированные на реальное время, clamp 0..100.
 
-Требуется привилегии (иначе GPU вернёт N/A):
-```bash
-sudo setcap cap_perfmon,cap_sys_admin+ep /usr/bin/intel_gpu_top
-```
+Привилегии НЕ нужны (в отличие от `intel_gpu_top`, которому требуется
+`cap_perfmon`). Если GPU недоступен или клиентов нет — пакет уходит с `pct=255`
+(N/A), прошивка показывает «--», а не 0%.
 
 ### Прошивка
 

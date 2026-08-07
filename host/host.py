@@ -3,8 +3,9 @@
 
 Collects CPU/GPU/RAM/NET/DISK/PROC metrics and sends them as one batched
 frame (header + TLV payload + CRC-8) over UART0 (CH340 on Linux:
-/dev/ttyUSB0). The GPU is read continuously by a background
-IntelGpuMonitor subprocess.
+/dev/ttyUSB0). The GPU is read by a background IntelGpuMonitor thread
+that polls DRM fdinfo (/proc) for VRAM usage and engine-busy deltas
+(no root / no intel_gpu_top required).
 """
 
 import argparse

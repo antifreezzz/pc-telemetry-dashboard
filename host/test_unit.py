@@ -11,7 +11,61 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from host.gpu_monitor import (
+    parse_fdinfo,
+    to_bytes,
+    to_ns,
+    scan_drm,
+    _parse_resource_text,
+    IntelGpuMonitor,
+)
 from host.protocol import net_kbps, pack_net_kbps
+
+
+class TestGpuFdinfo(unittest.TestCase):
+    SAMPLE = (
+        "pos:\t0\n"
+        "flags:\t0100002\n"
+        "drm-pdev:\t0000:03:00.0\n"
+        "drm-client-id:\t35\n"
+        "drm-total-local0:\t35652 KiB\n"
+        "drm-resident-local0:\t35652 KiB\n"
+        "drm-active-local0:\t0 B\n"
+        "drm-engine-render:\t573979900 ns\n"
+        "drm-engine-compute:\t10047118432 ns\n"
+    )
+
+    def test_parse_fdinfo(self):
+        d = parse_fdinfo(self.SAMPLE)
+        self.assertEqual(d["drm-pdev"], "0000:03:00.0")
+        self.assertEqual(d["drm-client-id"], "35")
+        self.assertEqual(d["drm-engine-render"], "573979900 ns")
+
+    def test_to_bytes(self):
+        self.assertEqual(to_bytes("0 B"), 0)
+        self.assertEqual(to_bytes("1024 B"), 1024)
+        self.assertEqual(to_bytes("35652 KiB"), 35652 * 1024)
+        self.assertEqual(to_bytes("1.5 MiB"), int(1.5 * 1024 * 1024))
+        self.assertEqual(to_bytes("2 GiB"), 2 * 1024 ** 3)
+
+    def test_to_ns(self):
+        self.assertEqual(to_ns("573979900 ns"), 573979900)
+        self.assertEqual(to_ns("0"), 0)
+        self.assertEqual(to_ns(""), 0)
+
+    def test_scan_is_thread_safe_smoke(self):
+        mon = IntelGpuMonitor(interval=0.1)
+        try:
+            snap = mon.snapshot()
+            self.assertEqual(len(snap), 4)
+        finally:
+            mon.stop()
+
+    def test_pci_mem_total_parses(self):
+        # 16 GiB (0x400000000) prefetchable IORESOURCE_MEM |0|v mostly
+        txt = ("0000000000000000 0000000000000000 0x200 00000000 00000000\n"
+               "0000000000000000 00000003ffffffff 0x121c2200 00000000 00000000\n")
+        self.assertEqual(_parse_resource_text(txt), 16 * 1024 ** 3)
 from host.protocol import (
     SYNC,
     FRAME_TYPE,

@@ -1,100 +1,159 @@
 #!/usr/bin/env python3
-"""Durable intel_gpu_top collector.
+"""Intel dGPU (i915) VRAM + busy collector via DRM fdinfo — no root needed.
 
-Runs one persistent `intel_gpu_top -J -s 500` subprocess in a background
-thread and continuously parses its JSON stream, exposing the latest
-Render/3D busy% and dedicated (local) VRAM usage. intel_gpu_top needs
-CAP_PERFMON; without it the subprocess exits immediately and the monitor
-exposes "no data" (-1, 0, 0, 0) and auto-restarts with a backoff.
+On a discrete Intel GPU every DRM client writes per-fd accounting into
+/proc/<pid>/fdinfo/<fd>:
 
-intel_gpu_top streams one JSON object per sample line, roughly:
+    drm-pdev:          0000:03:00.0
+    drm-client-id:     35
+    drm-total-local0:  35652 KiB
+    drm-resident-local0: 35652 KiB        <- resident device-local (VRAM) bytes
+    drm-engine-render: 573979900 ns       <- cumulative engine busy time
 
-    {"busy": 12.5, "engine-classes": [{"name": "Render/3D", "busy": 43.7}],
-     "memory": {"region": [{"name": "local", "used": N, "total": M}]}}
+The same client reports identical numbers on all its fds, so we dedup by
+(pid, drm-client-id) taking the max. VRAM used = sum of resident-local0 over
+unique clients; VRAM total = the device's prefetchable PCI MEM BAR. GPU busy
+= wall-clock normalized delta of summed drm-engine-render + drm-engine-compute
+(the Render/3D class, matching intel_gpu_top's Render/3D).
 
-Some builds nest engines under "engines"/{"class":[...]}, and the device
-list may be printed at startup. We parse defensively and keep the last
-good values on any failure.
+This works without CAP_PERFMON (unlike intel_gpu_top) on kernels that expose
+the engine timestamps in fdinfo. No data -> (-1, 0, 0, 0).
 """
 
-import json
-import subprocess
+import os
 import threading
+import time
+
+_ENGINES_BUSY = ("render", "compute")
+_UNITS = {"B": 1, "KiB": 1024, "MiB": 1024 ** 2, "GiB": 1024 ** 3, "TiB": 1024 ** 4}
 
 
-def _clamp(v: int) -> int:
-    if v < 0:
+def parse_fdinfo(text: str) -> dict:
+    d = {}
+    for line in text.splitlines():
+        k, sep, v = line.partition(":")
+        if sep:
+            d[k.strip()] = v.strip()
+    return d
+
+
+def to_bytes(val: str) -> int:
+    if not val:
         return 0
-    return min(100, v)
+    parts = val.split()
+    try:
+        n = float(parts[0])
+    except ValueError:
+        return 0
+    unit = parts[1] if len(parts) > 1 else "B"
+    return int(n * _UNITS.get(unit, 1))
 
 
-def _is_render(name: str) -> bool:
-    lowered = name.lower()
-    return "render" in lowered or "3d" in lowered
+def to_ns(val: str) -> int:
+    """Cumulative engine counter like '573979900 ns' -> ns int."""
+    if not val:
+        return 0
+    parts = val.split()
+    try:
+        return int(float(parts[0]))
+    except ValueError:
+        return 0
 
 
-def _engines(sample: dict) -> list:
-    for key in ("engine-classes", "engines"):
-        val = sample.get(key)
-        if isinstance(val, dict) and isinstance(val.get("class"), list):
-            return [e for e in val["class"] if isinstance(e, dict)]
-        if isinstance(val, list):
-            return [e for e in val if isinstance(e, dict)]
-    return []
+def _parse_resource_text(text: str) -> int:
+    """Prefetchable (IORESOURCE_MEM 0x200) PCI MEM BAR size in bytes."""
+    best = 0
+    for line in text.splitlines():
+        cols = line.split()
+        if len(cols) < 3:
+            continue
+        start = int(cols[0], 16)
+        end = int(cols[1], 16)
+        flags = int(cols[2], 16)
+        if flags & 0x200 and end > start:  # IORESOURCE_MEM
+            best = max(best, end - start + 1)
+    return best
 
 
-def _busy_of(sample: dict) -> int:
-    """Best busy pct for the sample: prefer Render/3D, else first engine,
-    else the top-level 'busy'. -1 when nothing is readable."""
-    engines = _engines(sample)
-    for eng in engines:
-        busy = eng.get("busy")
-        if isinstance(busy, (int, float)) and _is_render(str(eng.get("name") or "")):
-            return _clamp(int(busy))
-    for eng in engines:
-        busy = eng.get("busy")
-        if isinstance(busy, (int, float)):
-            return _clamp(int(busy))
-    top_busy = sample.get("busy")
-    if isinstance(top_busy, (int, float)):
-        return _clamp(int(top_busy))
-    return -1
+def _pci_mem_total(pdev: str) -> int:
+    """Prefetchable PCI MEM BAR size = device VRAM capacity (bytes)."""
+    try:
+        with open(f"/sys/bus/pci/devices/{pdev}/resource") as f:
+            return _parse_resource_text(f.read())
+    except OSError:
+        return 0
 
 
-def _parse_sample(sample: dict, prev_pct: int, prev_used: int, prev_total: int) -> tuple:
-    """Return (pct, vram_used_mb, vram_total_mb); fall back to previous
-    values on any parse failure."""
-    busy = _busy_of(sample)
-    if busy < 0:
-        pct = prev_pct
-    else:
-        pct = busy
-    used = prev_used
-    total = prev_total
-    memory = sample.get("memory")
-    if isinstance(memory, dict) and isinstance(memory.get("region"), list):
-        regions = [r for r in memory["region"] if isinstance(r, dict)]
-        chosen = next((r for r in regions if str(r.get("name") or "").lower() == "local"), None)
-        if chosen is None and regions:
-            chosen = regions[0]
-        if chosen is not None:
-            used = int(chosen.get("used") or 0) // (1024 * 1024)
-            total = int(chosen.get("total") or 0) // (1024 * 1024)
-    return pct, used, total
+def scan_drm() -> tuple:
+    """Return (clients, pdev).
+
+    clients: dict (pid, drm-client-id) -> {res: int bytes, eng: {engine: ns}}
+    pdev: first seen drm-pdev string or None.
+    """
+    clients: dict = {}
+    pdev = None
+    for pid_name in os.listdir("/proc"):
+        if not pid_name.isdigit():
+            continue
+        fddir = f"/proc/{pid_name}/fdinfo"
+        try:
+            fds = os.listdir(fddir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(f"/proc/{pid_name}/fd/{fd}")
+            except OSError:
+                continue
+            if not target.startswith("/dev/dri/"):
+                continue
+            try:
+                with open(f"{fddir}/{fd}") as f:
+                    info = parse_fdinfo(f.read())
+            except OSError:
+                continue
+            cid = info.get("drm-client-id")
+            if cid is None:
+                continue
+            pdev = info.get("drm-pdev") or pdev
+            key = (int(pid_name), cid)
+            prev = clients.get(key)
+            res = to_bytes(info.get("drm-resident-local0", "0"))
+            eng = {
+                name: to_ns(info.get(f"drm-engine-{name}", "0"))
+                for name in _ENGINES_BUSY
+            }
+            if prev is None:
+                clients[key] = {"res": res, "eng": eng}
+            else:
+                prev["res"] = max(prev["res"], res)
+                for name in _ENGINES_BUSY:
+                    prev["eng"][name] = max(prev["eng"][name], eng[name])
+    return clients, pdev
 
 
 class IntelGpuMonitor:
-    """Background thread running one persistent intel_gpu_top subprocess."""
+    """Background thread sampling DRM fdinfo every ~0.5s."""
 
-    def __init__(self, device: int = 0) -> None:
-        self._device = device
+    def __init__(self, interval: float = 0.5) -> None:
+        self._interval = interval
         self._lock = threading.Lock()
         self._pct = -1
         self._vram_used = 0
         self._vram_total = 0
+        self._prev_eng = None
+        self._prev_wall = None
+        self._total_cached = 0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def _clamp(self, v: float) -> int:
+        if v < 0:
+            return 0
+        if v > 100:
+            return 100
+        return int(v)
 
     def _set(self, pct: int, used: int, total: int) -> None:
         with self._lock:
@@ -103,60 +162,41 @@ class IntelGpuMonitor:
             self._vram_total = total
 
     def snapshot(self) -> tuple:
-        """Return (pct, vram_pct, vram_used_mb, vram_total_mb), or
-        (-1, 0, 0, 0) when no sample is available yet or the process died."""
+        """(busy_pct, vram_pct, vram_used_mb, vram_total_mb); (-1,0,0,0) = no GPU."""
         with self._lock:
             pct = self._pct
             used = self._vram_used
             total = self._vram_total
         if pct < 0 or total <= 0:
             return pct, 0, used, total
-        vram_pct = _clamp(round(used / total * 100))
-        return _clamp(pct), vram_pct, used, total
+        return pct, self._clamp(round(used / total * 100)), used, total
 
     def stop(self) -> None:
         self._stop.set()
         self._thread.join(timeout=1)
 
     def _run(self) -> None:
-        backoff = 2.0
         while not self._stop.is_set():
-            cmd = ["intel_gpu_top", "-J", "-s", "500"]
-            if self._device:
-                cmd += ["-d", self._device]
-            try:
-                proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-                )
-            except (FileNotFoundError, OSError):
-                self._stop.wait(backoff)
-                backoff = min(30.0, backoff * 2.5)
-                continue
-            try:
-                for raw in proc.stdout:
-                    if self._stop.is_set():
-                        break
-                    line = raw.decode("utf-8", errors="replace").strip()
-                    if not line:
-                        continue
-                    try:
-                        sample = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(sample, dict):
-                        continue
-                    pct, used, total = _parse_sample(
-                        sample, self._pct, self._vram_used, self._vram_total
-                    )
-                    self._set(pct, used, total)
-            finally:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-                try:
-                    proc.wait()
-                except subprocess.SubprocessError:
-                    pass
-            self._stop.wait(backoff)
-            backoff = min(30.0, backoff * 2.5)
+            now = time.monotonic()
+            clients, pdev = scan_drm()
+            total = self._total_cached
+            if total <= 0 and pdev:
+                total = _pci_mem_total(pdev)
+                if total > 0:
+                    self._total_cached = total
+
+            used_mb = sum(c["res"] for c in clients.values()) // (1024 * 1024)
+
+            eng_sum = sum(c["eng"][e] for c in clients.values() for e in _ENGINES_BUSY)
+            pct = self._pct
+            if self._prev_eng is not None:
+                wall = now - self._prev_wall
+                if wall > 0:
+                    d_ns = max(0, eng_sum - self._prev_eng)
+                    busy = d_ns / (wall * 1e9) * 100.0
+                    pct = self._clamp(busy)
+            self._prev_eng = eng_sum
+            self._prev_wall = now
+
+            self._set(pct, used_mb, total // (1024 * 1024))
+            self._stop.wait(self._interval)
