@@ -25,6 +25,7 @@ import threading
 import time
 
 _ENGINES_BUSY = ("render", "compute")
+_DEAD_BAND = 5.0  # show 0% below this busy to hide desktop-compositor idle churn
 _UNITS = {"B": 1, "KiB": 1024, "MiB": 1024 ** 2, "GiB": 1024 ** 3, "TiB": 1024 ** 4}
 
 
@@ -149,8 +150,8 @@ class IntelGpuMonitor:
         self._thread.start()
 
     def _clamp(self, v: float) -> int:
-        if v < 0:
-            return 0
+        if v < _DEAD_BAND:
+            return 0  # hide compositor idle -> a removed load snaps straight to 0
         if v > 100:
             return 100
         return int(v)
