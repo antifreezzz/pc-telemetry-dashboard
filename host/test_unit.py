@@ -8,9 +8,12 @@ import os
 import struct
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from host import metrics
+from host.metrics import sleep_interval
 from host.gpu_monitor import (
     parse_fdinfo,
     to_bytes,
@@ -287,6 +290,91 @@ class TestPackFrame(unittest.TestCase):
         decoded = decode_frame(frame)
         self.assertEqual(len(decoded), 2)
         self.assertEqual(decoded[1], (FIELD_CPU, b"\x05"))
+
+
+class TestSleepInterval(unittest.TestCase):
+    def test_full_elapsed_returns_zero(self):
+        self.assertEqual(sleep_interval(0.5, 0.5), 0.0)
+
+    def test_no_elapsed_returns_full_interval(self):
+        self.assertEqual(sleep_interval(0.5, 0.0), 0.5)
+
+    def test_elapsed_exceeding_interval_clamps_to_zero(self):
+        self.assertEqual(sleep_interval(0.5, 2.0), 0.0)
+
+    def test_never_exceeds_interval(self):
+        for elapsed in (0.0, 0.001, 0.2, 0.5, 1.0, 100.0):
+            self.assertLessEqual(sleep_interval(0.5, elapsed), 0.5)
+
+    def test_fixed_cadence_stays_linear(self):
+        # Simulate a fixed-cadence loop: N frames must take ~N*interval, not
+        # quadratic like the old bug (sleeping for the whole previous interval).
+        interval = 0.5
+        work = 0.15
+        total = 0.0
+        n = 100
+        for _ in range(n):
+            total += work
+            total += sleep_interval(interval, work)
+        self.assertAlmostEqual(total, n * interval, delta=n * 0.05)
+
+
+class _FakeProc:
+    """Mimics psutil.Process.cpu_percent: 0.0 on the priming call, real value after."""
+
+    def __init__(self, pid, name, cpu_second):
+        self.pid = pid
+        self.info = {"pid": pid, "name": name}
+        self._cpu_second = cpu_second
+        self._primed = False
+
+    def cpu_percent(self, interval=None):
+        if not self._primed:
+            self._primed = True
+            return 0.0
+        return float(self._cpu_second)
+
+    def memory_percent(self):
+        return 1.0
+
+
+class TestProcSnapshot(unittest.TestCase):
+    def _fake_iter(self, attrs=None):
+        return [_FakeProc(100 + i, f"proc{i}", (i + 1) * 10) for i in range(8)]
+
+    def test_returns_primed_cpu_not_zero(self):
+        with mock.patch.object(metrics.psutil, "process_iter", side_effect=self._fake_iter), \
+             mock.patch.object(metrics.time, "sleep"):
+            out = metrics.proc_snapshot(3)
+        # second call on the SAME objects yields 80/70/60, sorted descending
+        self.assertEqual(out, [(80, 107, "proc7"), (70, 106, "proc6"), (60, 105, "proc5")])
+
+
+class TestGpuMonitorPriming(unittest.TestCase):
+    _CLIENTS = {(123, "1"): {"res": 100 * 1024 * 1024,
+                             "eng": {"render": 1000, "compute": 0}}}
+
+    def test_first_snapshot_is_idle_zero_not_na(self):
+        with mock.patch("host.gpu_monitor.scan_drm", return_value=(dict(self._CLIENTS), "0000:03:00.0")), \
+             mock.patch("host.gpu_monitor._pci_mem_total", return_value=16 * 1024 ** 3):
+            mon = IntelGpuMonitor(interval=0.1)
+            try:
+                pct, _vram_pct, _used, total = mon.snapshot()
+            finally:
+                mon.stop()
+        self.assertEqual(pct, 0)
+        self.assertEqual(total, 16 * 1024)
+
+    def test_no_gpu_stays_na(self):
+        with mock.patch("host.gpu_monitor.scan_drm", return_value=({}, None)), \
+             mock.patch("host.gpu_monitor._pci_mem_total", return_value=0):
+            mon = IntelGpuMonitor(interval=0.1)
+            try:
+                pct, _vram_pct, _used, total = mon.snapshot()
+            finally:
+                mon.stop()
+        self.assertEqual(pct, -1)
+        self.assertEqual(total, 0)
 
 
 if __name__ == "__main__":

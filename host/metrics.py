@@ -11,6 +11,18 @@ def _mb(value: int) -> int:
     return int(value // (1024 * 1024))
 
 
+def sleep_interval(interval: float, elapsed: float) -> float:
+    """Seconds to sleep to keep a fixed `interval` cadence.
+
+    `elapsed` is the time already spent collecting this frame's metrics. The
+    returned value is never negative and never exceeds `interval`, so the loop
+    cannot drift into progressively longer sleeps.
+    """
+    if interval <= 0:
+        return 0.0
+    return max(0.0, interval - elapsed)
+
+
 def cpu_snapshot() -> tuple:
     """Return (overall pct, per-core list)."""
     overall = int(psutil.cpu_percent(interval=None))
@@ -61,25 +73,25 @@ def header_snapshot() -> tuple:
 
 def proc_snapshot(n: int = 6) -> list:
     """Top-n processes by recent CPU%, sorted by memory as a fallback."""
-    procs = []
-    for p in psutil.process_iter(["cpu_percent", "memory_percent", "pid", "name"]):
+    procs = list(psutil.process_iter(["pid", "name"]))
+    for p in procs:
         try:
             p.cpu_percent(interval=None)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     time.sleep(0.05)
-    for p in psutil.process_iter(["cpu_percent", "memory_percent", "pid", "name"]):
+    entries = []
+    for p in procs:
         try:
-            info = p.info
-            pid = info.get("pid") or 0
-            name = str(info.get("name") or "?")
-            cpu = int(info.get("cpu_percent") or 0)
-            mem = info.get("memory_percent") or 0
-            procs.append((cpu, mem, pid, name))
-        except (psutil.NoSuchProcess, psutil.AccessDenied, TypeError):
+            cpu = int(p.cpu_percent(interval=None))
+            mem = p.memory_percent() or 0.0
+            pid = p.pid or 0
+            name = str(p.info.get("name") or "?")
+            entries.append((cpu, mem, pid, name))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
-    procs.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    entries.sort(key=lambda t: (t[0], t[1]), reverse=True)
     out = []
-    for cpu, _mem, pid, name in procs[:n]:
+    for cpu, _mem, pid, name in entries[:n]:
         out.append((cpu, pid, name))
     return out

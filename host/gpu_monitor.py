@@ -146,6 +146,9 @@ class IntelGpuMonitor:
         self._prev_wall = None
         self._total_cached = 0
         self._stop = threading.Event()
+        # Prime a baseline synchronously so the very first snapshot() already
+        # reports 0% (idle) instead of N/A when a GPU is present.
+        self._tick()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -176,28 +179,34 @@ class IntelGpuMonitor:
         self._stop.set()
         self._thread.join(timeout=1)
 
+    def _tick(self) -> None:
+        now = time.monotonic()
+        clients, pdev = scan_drm()
+        total = self._total_cached
+        if total <= 0 and pdev:
+            total = _pci_mem_total(pdev)
+            if total > 0:
+                self._total_cached = total
+
+        used_mb = sum(c["res"] for c in clients.values()) // (1024 * 1024)
+
+        eng_sum = sum(c["eng"][e] for c in clients.values() for e in _ENGINES_BUSY)
+        if total <= 0:
+            pct = -1  # no GPU: keep N/A, never fabricate a busy %
+        elif self._prev_eng is not None and self._prev_wall is not None:
+            wall = now - self._prev_wall
+            if wall > 0:
+                d_ns = max(0, eng_sum - self._prev_eng)
+                busy = d_ns / (wall * 1e9) * 100.0
+                pct = self._clamp(busy)
+        else:
+            pct = 0  # GPU present but no baseline yet: report idle 0%, not N/A
+        self._prev_eng = eng_sum
+        self._prev_wall = now
+
+        self._set(pct, used_mb, total // (1024 * 1024))
+
     def _run(self) -> None:
         while not self._stop.is_set():
-            now = time.monotonic()
-            clients, pdev = scan_drm()
-            total = self._total_cached
-            if total <= 0 and pdev:
-                total = _pci_mem_total(pdev)
-                if total > 0:
-                    self._total_cached = total
-
-            used_mb = sum(c["res"] for c in clients.values()) // (1024 * 1024)
-
-            eng_sum = sum(c["eng"][e] for c in clients.values() for e in _ENGINES_BUSY)
-            pct = self._pct
-            if self._prev_eng is not None:
-                wall = now - self._prev_wall
-                if wall > 0:
-                    d_ns = max(0, eng_sum - self._prev_eng)
-                    busy = d_ns / (wall * 1e9) * 100.0
-                    pct = self._clamp(busy)
-            self._prev_eng = eng_sum
-            self._prev_wall = now
-
-            self._set(pct, used_mb, total // (1024 * 1024))
+            self._tick()
             self._stop.wait(self._interval)

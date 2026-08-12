@@ -84,12 +84,13 @@ def main() -> None:
     monitor = IntelGpuMonitor()
     net_prev = psutil.net_io_counters()
     disk_prev = psutil.disk_io_counters()
+    psutil.cpu_percent(interval=None)  # prime CPU so the first frame carries a real value
     prev_t = time.monotonic()
 
     try:
         while True:
             now_t = time.monotonic()
-            interval = max(0.001, now_t - prev_t)
+            elapsed = max(0.001, now_t - prev_t)
             prev_t = now_t
 
             net_now = psutil.net_io_counters()
@@ -99,15 +100,15 @@ def main() -> None:
                 "cpu": metrics.cpu_snapshot(),
                 "ram": metrics.ram_snapshot(),
                 "gpu": metrics.gpu_snapshot(monitor),
-                "net": metrics.net_snapshot(net_prev, net_now, interval),
-                "disk": metrics.disk_snapshot(disk_prev, disk_now, interval),
+                "net": metrics.net_snapshot(net_prev, net_now, elapsed),
+                "disk": metrics.disk_snapshot(disk_prev, disk_now, elapsed),
                 "header": metrics.header_snapshot(),
                 "proc": metrics.proc_snapshot(),
             }
             net_prev = net_now
             disk_prev = disk_now
 
-            ser.write(build_frame(snaps, interval))
+            ser.write(build_frame(snaps, args.interval))
 
             cpu = snaps["cpu"][0]
             ram_pct, ram_used, ram_total = snaps["ram"]
@@ -122,7 +123,7 @@ def main() -> None:
                 f"disk rd={rd:5d} wr={wr:5d} KiB/s used={used_pct:3d}%",
                 flush=True,
             )
-            time.sleep(interval)
+            time.sleep(metrics.sleep_interval(args.interval, time.monotonic() - now_t))
     except KeyboardInterrupt:
         print("\n[host] exiting", flush=True)
     finally:
