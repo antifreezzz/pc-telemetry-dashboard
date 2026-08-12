@@ -172,24 +172,16 @@ static void set_label_font(lv_obj_t *lbl, const lv_font_t *font, lv_color_t colo
     lv_obj_set_style_text_color(lbl, color, 0);
 }
 
-// Transparent clickable layer over a card. Cards hold display-only children
-// (arcs, bars, labels) which would otherwise swallow the press, so the tap
-// catcher sits on top and forwards the event with a view id in user_data.
+// Cards are clickable by default (lv_obj base flag) and hold only display-only
+// children, so the press lands on the card itself. The card's children must
+// have LV_OBJ_FLAG_CLICKABLE cleared, otherwise a tap on an arc/bar/container
+// would hit that child (no handler) instead of bubbling to the card.
 static void card_tap_cb(lv_event_t *e);
 
-static void make_click_catcher(lv_obj_t *card, int view)
+static void make_card_tappable(lv_obj_t *card, int view)
 {
-    lv_obj_t *ov = lv_obj_create(card);
-    lv_obj_set_size(ov, lv_obj_get_width(card), lv_obj_get_height(card));
-    lv_obj_set_pos(ov, 0, 0);
-    lv_obj_clear_flag(ov, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(ov, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_opa(ov, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ov, 0, 0);
-    lv_obj_set_style_shadow_opa(ov, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_radius(ov, 0, 0);
-    lv_obj_set_style_pad_all(ov, 0, 0);
-    lv_obj_add_event_cb(ov, card_tap_cb, LV_EVENT_PRESSED, (void *)(intptr_t)view);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(card, card_tap_cb, LV_EVENT_PRESSED, (void *)(intptr_t)view);
 }
 
 // ---------- header ----------
@@ -250,6 +242,9 @@ static void ovl_open_view(int view)
     lv_label_set_text(lbl_ovl_title, titles[view]);
     rebuild_proc_rows();
     lv_obj_clear_flag(ovl_proc, LV_OBJ_FLAG_HIDDEN);
+#ifdef PROTO_DEBUG
+    Serial.printf("ovl open view=%d\n", view);
+#endif
 }
 
 static void ovl_toggle_cb(lv_event_t *e)
@@ -269,7 +264,11 @@ static void ovl_close_cb(lv_event_t *e)
 
 static void card_tap_cb(lv_event_t *e)
 {
-    ovl_open_view((int)(intptr_t)lv_event_get_user_data(e));
+    int view = (int)(intptr_t)lv_event_get_user_data(e);
+#ifdef PROTO_DEBUG
+    Serial.printf("card tap view=%d\n", view);
+#endif
+    ovl_open_view(view);
 }
 
 static void slider_bright_cb(lv_event_t *e)
@@ -390,6 +389,7 @@ void ui_init(int w, int h)
     lv_obj_set_size(arc_cpu, 120, 120);
     lv_arc_set_range(arc_cpu, 0, 100);
     lv_arc_set_value(arc_cpu, 0);
+    lv_obj_clear_flag(arc_cpu, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_style(arc_cpu, &style_arc_bg, LV_PART_MAIN);
     lv_obj_add_style(arc_cpu, &style_arc_indic, LV_PART_INDICATOR);
     lv_obj_align(arc_cpu, LV_ALIGN_CENTER, 0, -16);
@@ -409,18 +409,20 @@ void ui_init(int w, int h)
     lv_obj_set_flex_align(cores_cont, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(cores_cont, 2, 0);
     lv_obj_align(cores_cont, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_clear_flag(cores_cont, LV_OBJ_FLAG_CLICKABLE);
     for (int i = 0; i < 32; i++) {
         bar_cores[i] = lv_bar_create(cores_cont);
         lv_obj_set_size(bar_cores[i], 5, 30);
         lv_bar_set_range(bar_cores[i], 0, 100);
         lv_bar_set_value(bar_cores[i], 0, LV_ANIM_OFF);
+        lv_obj_clear_flag(bar_cores[i], LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_style_bg_color(bar_cores[i], C_ARC_BG, LV_PART_MAIN);
         lv_obj_set_style_bg_color(bar_cores[i], C_CYAN, LV_PART_INDICATOR);
         lv_obj_set_style_radius(bar_cores[i], 2, 0);
         lv_obj_set_style_radius(bar_cores[i], 2, LV_PART_INDICATOR);
         lv_obj_add_flag(bar_cores[i], LV_OBJ_FLAG_HIDDEN);
     }
-    make_click_catcher(card_cpu, VIEW_CPU);
+    make_card_tappable(card_cpu, VIEW_CPU);
 
     // GPU card
     card_gpu = make_card(scr, margin + card_w + gap, top, card_w, card_h, "GPU");
@@ -429,6 +431,7 @@ void ui_init(int w, int h)
     lv_obj_set_size(arc_gpu, 120, 120);
     lv_arc_set_range(arc_gpu, 0, 100);
     lv_arc_set_value(arc_gpu, 0);
+    lv_obj_clear_flag(arc_gpu, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_style(arc_gpu, &style_arc_bg, LV_PART_MAIN);
     lv_obj_add_style(arc_gpu, &style_arc_indic, LV_PART_INDICATOR);
     lv_obj_align(arc_gpu, LV_ALIGN_CENTER, 0, -18);
@@ -443,6 +446,7 @@ void ui_init(int w, int h)
     lv_obj_align(bar_vram, LV_ALIGN_BOTTOM_MID, 0, -18);
     lv_bar_set_range(bar_vram, 0, 100);
     lv_bar_set_value(bar_vram, 0, LV_ANIM_OFF);
+    lv_obj_clear_flag(bar_vram, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(bar_vram, C_ARC_BG, LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar_vram, C_GREEN, LV_PART_INDICATOR);
     lv_obj_set_style_radius(bar_vram, 6, 0);
@@ -451,7 +455,7 @@ void ui_init(int w, int h)
     lv_label_set_text(lbl_vram, "0 / 0 MB");
     set_label_font(lbl_vram, &lv_font_montserrat_12, C_MUTED);
     lv_obj_align(lbl_vram, LV_ALIGN_BOTTOM_MID, 0, 0);
-    make_click_catcher(card_gpu, VIEW_GPU);
+    make_card_tappable(card_gpu, VIEW_GPU);
 
     // RAM card
     card_ram = make_card(scr, margin, top + card_h + gap, card_w, card_h, "RAM");
@@ -461,6 +465,7 @@ void ui_init(int w, int h)
     lv_obj_align(bar_ram, LV_ALIGN_CENTER, 0, -14);
     lv_bar_set_range(bar_ram, 0, 100);
     lv_bar_set_value(bar_ram, 0, LV_ANIM_OFF);
+    lv_obj_clear_flag(bar_ram, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(bar_ram, C_ARC_BG, LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar_ram, C_GREEN, LV_PART_INDICATOR);
     lv_obj_set_style_radius(bar_ram, 8, 0);
@@ -469,7 +474,7 @@ void ui_init(int w, int h)
     lv_label_set_text(lbl_ram, "0 / 0 MB");
     set_label_font(lbl_ram, &lv_font_montserrat_14, C_TEXT);
     lv_obj_align(lbl_ram, LV_ALIGN_BOTTOM_MID, 0, -2);
-    make_click_catcher(card_ram, VIEW_RAM);
+    make_card_tappable(card_ram, VIEW_RAM);
 
     // NET card
     lv_obj_t *net = make_card(scr, margin + card_w + gap, top + card_h + gap, card_w, card_h, "NET");
@@ -506,6 +511,7 @@ void ui_init(int w, int h)
     lv_obj_align(bar_disk, LV_ALIGN_LEFT_MID, 64, 0);
     lv_bar_set_range(bar_disk, 0, 100);
     lv_bar_set_value(bar_disk, 0, LV_ANIM_OFF);
+    lv_obj_clear_flag(bar_disk, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(bar_disk, C_ARC_BG, LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar_disk, C_AMBER, LV_PART_INDICATOR);
     lv_obj_set_style_radius(bar_disk, 6, 0);
@@ -514,7 +520,7 @@ void ui_init(int w, int h)
     lv_label_set_text(lbl_disk, "rd 0.0 / wr 0.0 MB/s");
     set_label_font(lbl_disk, &lv_font_montserrat_14, C_TEXT);
     lv_obj_align(lbl_disk, LV_ALIGN_RIGHT_MID, -10, 0);
-    make_click_catcher(card_disk, VIEW_DISK);
+    make_card_tappable(card_disk, VIEW_DISK);
 
     // ---------------- PROC overlay ----------------
     ovl_proc = lv_obj_create(scr);
@@ -711,11 +717,10 @@ void ui_set_header(uint32_t uptime_sec, uint32_t epoch_sec, const char *hostname
     g_hostname_local[sizeof(g_hostname_local) - 1] = '\0';
     lv_label_set_text(lbl_hostname, g_hostname_local);
 
-    char buf[40];
-    fmt_uptime(buf, sizeof(buf), uptime_sec);
-    lv_label_set_text(lbl_uptime, buf);
-    fmt_clock(buf, sizeof(buf), epoch_sec);
-    lv_label_set_text(lbl_clock, buf);
+    // uptime/clock are rendered only by ui_periodic from the local monotonic
+    // counter. Writing the raw host snapshot here too would fight with it:
+    // the two values differ by the serial transport delay and the labels
+    // would flicker a second back and forth each frame.
 }
 
 static uint32_t rd_u32(const uint8_t *p)
