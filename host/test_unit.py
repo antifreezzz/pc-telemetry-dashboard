@@ -79,6 +79,11 @@ from host.protocol import (
     FIELD_DISK,
     FIELD_HEADER,
     FIELD_PROC,
+    PROC_KIND_CPU,
+    PROC_KIND_RAM,
+    PROC_KIND_GPU,
+    PROC_KIND_DISK_RD,
+    PROC_KIND_DISK_WR,
     crc8,
     pack_frame,
     pack_kiBs,
@@ -91,6 +96,8 @@ from host.protocol import (
     build_header,
     build_proc,
 )
+
+PROC_ENTRY_BYTES = 22
 
 
 class TestNetKbps(unittest.TestCase):
@@ -209,25 +216,35 @@ class TestBuildHelpers(unittest.TestCase):
 
     def test_proc_layout(self):
         entries = [(10, 1234, "foo"), (20, 5678, "bar")]
-        data = build_proc(entries)
-        self.assertEqual(len(data), 1 + 2 * 19)
-        self.assertEqual(data[0], 2)
-        off = 1
-        for cpu_pct, pid, name in entries:
-            p, ppid, pname = struct.unpack_from("<B H 16s", data, off)
-            self.assertEqual(p, cpu_pct)
-            self.assertEqual(ppid, pid)
+        data = build_proc(PROC_KIND_RAM, entries)
+        self.assertEqual(len(data), 2 + 2 * PROC_ENTRY_BYTES)
+        self.assertEqual(data[0], PROC_KIND_RAM)
+        self.assertEqual(data[1], 2)
+        off = 2
+        for value, pid, name in entries:
+            v, p, pname = struct.unpack_from("<I H 16s", data, off)
+            self.assertEqual(v, value)
+            self.assertEqual(p, pid)
             self.assertEqual(pname.rstrip(b"\x00").decode(), name)
-            off += 19
+            off += PROC_ENTRY_BYTES
+
+    def test_proc_kinds_encoded(self):
+        for kind in (PROC_KIND_CPU, PROC_KIND_RAM, PROC_KIND_GPU,
+                     PROC_KIND_DISK_RD, PROC_KIND_DISK_WR):
+            data = build_proc(kind, [(7, 42, "x")])
+            self.assertEqual(data[0], kind)
 
     def test_proc_long_name(self):
-        data = build_proc([(5, 1, "y" * 40)])
-        self.assertEqual(len(data[1:]), 19)
-        self.assertLessEqual(len(data[1:].split(b"\x00", 1)[0]), 15)
+        data = build_proc(PROC_KIND_CPU, [(5, 1, "y" * 40)])
+        self.assertEqual(len(data[2:]), PROC_ENTRY_BYTES)
+        v, p, name = struct.unpack_from("<I H 16s", data, 2)
+        self.assertLessEqual(len(name.rstrip(b"\x00").decode()), 15)
 
-    def test_proc_pid_clamp(self):
-        data = build_proc([(50, 1 << 20, "p")])
-        self.assertEqual(struct.unpack_from("<H", data, 2)[0], 0xFFFF)
+    def test_proc_value_and_pid_clamp(self):
+        data = build_proc(PROC_KIND_CPU, [(1 << 40, 1 << 20, "p")])
+        v, p, _ = struct.unpack_from("<I H 16s", data, 2)
+        self.assertEqual(v, 0xFFFFFFFF)
+        self.assertEqual(p, 0xFFFF)
 
 
 def decode_frame(frame: bytes) -> list:
@@ -245,6 +262,11 @@ def decode_frame(frame: bytes) -> list:
         fields.append((field_id, payload[pos + 2 : pos + 2 + field_len]))
         pos += 2 + field_len
     return fields
+
+
+def field_data(decoded: list, field_id: int) -> list:
+    """All data blobs for a given field id (a frame may repeat a field id)."""
+    return [data for fid, data in decoded if fid == field_id]
 
 
 class TestPackFrame(unittest.TestCase):
@@ -273,17 +295,27 @@ class TestPackFrame(unittest.TestCase):
             (FIELD_NET, build_net(1234, 4321)),
             (FIELD_DISK, build_disk(11, 22, 55)),
             (FIELD_HEADER, build_header(99, 1000, "host-test")),
-            (FIELD_PROC, build_proc([(9, 1, "a"), (8, 2, "bb"), (7, 3, "ccc")])),
+            (FIELD_PROC, build_proc(PROC_KIND_CPU, [(9, 1, "a")])),
+            (FIELD_PROC, build_proc(PROC_KIND_RAM, [(8, 2, "bb")])),
+            (FIELD_PROC, build_proc(PROC_KIND_GPU, [(7, 3, "ccc")])),
+            (FIELD_PROC, build_proc(PROC_KIND_DISK_RD, [(6, 4, "dd")])),
+            (FIELD_PROC, build_proc(PROC_KIND_DISK_WR, [(5, 5, "e")])),
         ]
         frame = pack_frame(fields)
-        decoded = dict(decode_frame(frame))
-        self.assertEqual(set(decoded.keys()), {FIELD_CPU, FIELD_RAM, FIELD_GPU,
-                                               FIELD_NET, FIELD_DISK,
-                                               FIELD_HEADER, FIELD_PROC})
-        self.assertEqual(decoded[FIELD_RAM], struct.pack("<BII", 61, 2048, 8192))
-        self.assertEqual(decoded[FIELD_GPU], struct.pack("<BBII", 70, 33, 2048, 8192))
-        self.assertEqual(len(decoded[FIELD_HEADER]), 32)
-        self.assertEqual(len(decoded[FIELD_PROC]), 1 + 3 * 19)
+        decoded = decode_frame(frame)
+        self.assertEqual(len(decoded), len(fields))
+        proc_blobs = field_data(decoded, FIELD_PROC)
+        self.assertEqual(len(proc_blobs), 5)
+        self.assertEqual([b[0] for b in proc_blobs],
+                         [PROC_KIND_CPU, PROC_KIND_RAM, PROC_KIND_GPU,
+                          PROC_KIND_DISK_RD, PROC_KIND_DISK_WR])
+        self.assertEqual([len(b) for b in proc_blobs],
+                         [2 + PROC_ENTRY_BYTES] * 5)
+        self.assertEqual(field_data(decoded, FIELD_RAM),
+                         [struct.pack("<BII", 61, 2048, 8192)])
+        self.assertEqual(field_data(decoded, FIELD_GPU),
+                         [struct.pack("<BBII", 70, 33, 2048, 8192)])
+        self.assertEqual(len(field_data(decoded, FIELD_HEADER)[0]), 32)
 
     def test_unknown_field_skippable(self):
         frame = pack_frame([(0x7F, b"\x01\x02\x03"), (FIELD_CPU, bytes([5]))])
@@ -345,9 +377,102 @@ class TestProcSnapshot(unittest.TestCase):
     def test_returns_primed_cpu_not_zero(self):
         with mock.patch.object(metrics.psutil, "process_iter", side_effect=self._fake_iter), \
              mock.patch.object(metrics.time, "sleep"):
-            out = metrics.proc_snapshot(3)
+            out = metrics.proc_cpu_snapshot(3)
         # second call on the SAME objects yields 80/70/60, sorted descending
         self.assertEqual(out, [(80, 107, "proc7"), (70, 106, "proc6"), (60, 105, "proc5")])
+
+
+class _FakeMemInfo:
+    def __init__(self, rss):
+        self.rss = rss
+
+
+class _FakeMemProc:
+    def __init__(self, pid, name, rss_bytes):
+        self.pid = pid
+        self.info = {"pid": pid, "name": name}
+        self._rss = rss_bytes
+
+    def memory_info(self):
+        return _FakeMemInfo(self._rss)
+
+
+class TestProcMemSnapshot(unittest.TestCase):
+    def _fake_iter(self, attrs=None):
+        return [_FakeMemProc(100 + i, f"p{i}", (i + 1) * (4 * 1024 * 1024))
+                for i in range(8)]
+
+    def test_sorted_by_rss_desc_in_mb(self):
+        with mock.patch.object(metrics.psutil, "process_iter", side_effect=self._fake_iter):
+            out = metrics.proc_mem_snapshot(3)
+        self.assertEqual(out, [(32, 107, "p7"), (28, 106, "p6"), (24, 105, "p5")])
+
+
+class _FakeIo:
+    def __init__(self, read_bytes, write_bytes):
+        self.read_bytes = read_bytes
+        self.write_bytes = write_bytes
+
+
+class _FakeIoProc:
+    def __init__(self, pid, name, read_bytes, write_bytes):
+        self.pid = pid
+        self.info = {"pid": pid, "name": name}
+        self._rd = read_bytes
+        self._wr = write_bytes
+
+    def io_counters(self):
+        return _FakeIo(self._rd, self._wr)
+
+
+class TestProcDiskSnapshot(unittest.TestCase):
+    def _run(self, calls):
+        tracker = metrics.ProcIoTracker()
+        procs_by_call = [
+            [_FakeIoProc(100 + i, f"p{i}", c[0], c[1])
+             for i, c in enumerate(counters)]
+            for counters in calls
+        ]
+
+        def fake_iter(attrs=None):
+            return procs_by_call.pop(0)
+
+        results = []
+        with mock.patch.object(metrics.psutil, "process_iter", side_effect=fake_iter):
+            for _ in range(len(calls)):
+                results.append(tracker.snapshot(0.5))
+        return results
+
+    def test_first_call_empty_then_rates_sorted_by_total(self):
+        calls = [
+            [(1000, 2000), (4000, 3000), (0, 0)],
+            [(1000 + 2048, 2000 + 1024), (4000 + 1024 * 512, 3000), (0, 0)],
+        ]
+        first, second = self._run(calls)
+        self.assertEqual(first, [])
+        # p1: rd 1024 KiB/s, wr 0 -> total 1024; p0: rd 4, wr 2 -> total 6
+        self.assertEqual(second[0], (1024, 0, 101, "p1"))
+        self.assertEqual(second[1], (4, 2, 100, "p0"))
+        self.assertEqual(second[2], (0, 0, 102, "p2"))
+
+
+class _FakeGpuMonitor:
+    def __init__(self, clients):
+        self._clients = clients
+
+    def top_clients(self, n):
+        return sorted(self._clients.items(), key=lambda kv: kv[1], reverse=True)[:n]
+
+
+class TestProcGpuSnapshot(unittest.TestCase):
+    def test_none_monitor_returns_empty(self):
+        self.assertEqual(metrics.proc_gpu_snapshot(None, 10), [])
+
+    def test_returns_mb_pid_name(self):
+        mon = _FakeGpuMonitor({100: 2 * 1024 * 1024, 101: 6 * 1024 * 1024})
+        with mock.patch("host.metrics._comm", return_value="gproc"):
+            out = metrics.proc_gpu_snapshot(mon, 10)
+        self.assertEqual(out, [(6, 101, "gproc"), (2, 100, "gproc")])
 
 
 class TestGpuMonitorPriming(unittest.TestCase):

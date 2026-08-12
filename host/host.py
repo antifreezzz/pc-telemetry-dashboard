@@ -29,6 +29,11 @@ from host.protocol import (
     FIELD_DISK,
     FIELD_HEADER,
     FIELD_PROC,
+    PROC_KIND_CPU,
+    PROC_KIND_RAM,
+    PROC_KIND_GPU,
+    PROC_KIND_DISK_RD,
+    PROC_KIND_DISK_WR,
     build_cpu,
     build_ram,
     build_gpu,
@@ -67,7 +72,15 @@ def build_frame(snaps: dict, interval: float) -> bytes:
         (FIELD_NET, build_net(*snaps["net"])),
         (FIELD_DISK, build_disk(*snaps["disk"])),
         (FIELD_HEADER, build_header(*snaps["header"])),
-        (FIELD_PROC, build_proc(snaps["proc"])),
+        (FIELD_PROC, build_proc(PROC_KIND_CPU, snaps["proc_cpu"])),
+        (FIELD_PROC, build_proc(PROC_KIND_RAM, snaps["proc_ram"])),
+        (FIELD_PROC, build_proc(PROC_KIND_GPU, snaps["proc_gpu"])),
+        (FIELD_PROC, build_proc(PROC_KIND_DISK_RD,
+                                [(rd, pid, name)
+                                 for rd, _wr, pid, name in snaps["proc_disk"]])),
+        (FIELD_PROC, build_proc(PROC_KIND_DISK_WR,
+                                [(wr, pid, name)
+                                 for _rd, wr, pid, name in snaps["proc_disk"]])),
     ]
     return pack_frame(fields)
 
@@ -82,6 +95,7 @@ def main() -> None:
 
     ser = open_serial(args.port, args.baud)
     monitor = IntelGpuMonitor()
+    io_tracker = metrics.ProcIoTracker()
     net_prev = psutil.net_io_counters()
     disk_prev = psutil.disk_io_counters()
     psutil.cpu_percent(interval=None)  # prime CPU so the first frame carries a real value
@@ -103,7 +117,10 @@ def main() -> None:
                 "net": metrics.net_snapshot(net_prev, net_now, elapsed),
                 "disk": metrics.disk_snapshot(disk_prev, disk_now, elapsed),
                 "header": metrics.header_snapshot(),
-                "proc": metrics.proc_snapshot(),
+                "proc_cpu": metrics.proc_cpu_snapshot(),
+                "proc_ram": metrics.proc_mem_snapshot(),
+                "proc_gpu": metrics.proc_gpu_snapshot(monitor),
+                "proc_disk": io_tracker.snapshot(elapsed),
             }
             net_prev = net_now
             disk_prev = disk_now

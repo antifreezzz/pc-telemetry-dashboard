@@ -142,6 +142,7 @@ class IntelGpuMonitor:
         self._pct = -1
         self._vram_used = 0
         self._vram_total = 0
+        self._per_pid: dict = {}
         self._prev_eng = None
         self._prev_wall = None
         self._total_cached = 0
@@ -159,11 +160,12 @@ class IntelGpuMonitor:
             return 100
         return int(v)
 
-    def _set(self, pct: int, used: int, total: int) -> None:
+    def _set(self, pct: int, used: int, total: int, per_pid: dict) -> None:
         with self._lock:
             self._pct = pct
             self._vram_used = used
             self._vram_total = total
+            self._per_pid = per_pid
 
     def snapshot(self) -> tuple:
         """(busy_pct, vram_pct, vram_used_mb, vram_total_mb); (-1,0,0,0) = no GPU."""
@@ -174,6 +176,12 @@ class IntelGpuMonitor:
         if pct < 0 or total <= 0:
             return pct, 0, used, total
         return pct, self._clamp(round(used / total * 100)), used, total
+
+    def top_clients(self, n: int = 10) -> list:
+        """Per-pid resident VRAM in bytes, descending (from the last tick)."""
+        with self._lock:
+            per_pid = dict(self._per_pid)
+        return sorted(per_pid.items(), key=lambda kv: kv[1], reverse=True)[:n]
 
     def stop(self) -> None:
         self._stop.set()
@@ -188,7 +196,10 @@ class IntelGpuMonitor:
             if total > 0:
                 self._total_cached = total
 
-        used_mb = sum(c["res"] for c in clients.values()) // (1024 * 1024)
+        per_pid: dict = {}
+        for (pid, _cid), c in clients.items():
+            per_pid[pid] = per_pid.get(pid, 0) + c["res"]
+        used_mb = sum(per_pid.values()) // (1024 * 1024)
 
         eng_sum = sum(c["eng"][e] for c in clients.values() for e in _ENGINES_BUSY)
         if total <= 0:
@@ -204,7 +215,7 @@ class IntelGpuMonitor:
         self._prev_eng = eng_sum
         self._prev_wall = now
 
-        self._set(pct, used_mb, total // (1024 * 1024))
+        self._set(pct, used_mb, total // (1024 * 1024), per_pid)
 
     def _run(self) -> None:
         while not self._stop.is_set():

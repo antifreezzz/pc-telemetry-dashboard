@@ -63,7 +63,19 @@ CRC → кадр отбрасывается, приёмник ресинкает
 | 0x04 | NET   | u32 rx_kB/s, u32 tx_kB/s                    |
 | 0x05 | DISK  | u32 rd_kB/s, u32 wr_kB/s, u8 used_pct       |
 | 0x06 | HEADER| u32 uptime_s, u32 epoch_s, char hostname[24] |
-| 0x07 | PROC  | u8 count, ×[u8 cpu, u16 pid, char name[16]] |
+| 0x07 | PROC  | u8 kind, u8 count, ×[u32 value, u16 pid, char name[16]] |
+
+`PROC` (0x07) обобщённый: несёт раскладку по процессам для параметра `kind`,
+отсортированную по убыванию `value`. Может присутствовать в кадре несколько раз
+(по разу на каждый kind):
+
+| kind | Параметр        | Единицы value            |
+|------|-----------------|--------------------------|
+| 0    | CPU             | %                        |
+| 1    | RAM             | RSS MB                   |
+| 2    | GPU             | VRAM MB                  |
+| 3    | DISK rd         | KiB/s (в порядке `rd+wr`) |
+| 4    | DISK wr         | KiB/s (тот же порядок)    |
 
 Эталонный энкодер: `host/protocol.py` (функции `pack_frame`, `build_*`).
 Парсер прошивки: `firmware/src/protocol.cpp` (state machine
@@ -120,8 +132,11 @@ pio run -t upload         # собирает и заливает в /dev/ttyUSB0
 - **GPU**: arc + % (+ «--» и серый arc при N/A) + VRAM-бар и `VRAM x / y MB`.
 - **RAM**: bar + `used / total MB`. **DISK**: полоса used% + `rd/wr MB/s`.
 - **NET**: чарт с двумя сериями RX/TX (cyan/green), Y 0..512 kB/s.
-- **PROC overlay** (фуллскрин): топ процессов по CPU; открывается кнопкой
-  PROC / тапом по hostname; внутри — слайдер яркости backlight (ledc, 0..255).
+- **PROC overlay** (фуллскрин): раскладка по процессам, сортировка по убыванию
+  параметра; открывается кнопкой PROC / тапом по hostname (top CPU), а также
+  тапом по карточке **CPU** (top CPU), **RAM** (top RSS MB), **GPU** (top VRAM MB)
+  или **DISK** (rd/wr KiB/s раздельно). Внутри — слайдер яркости backlight
+  (ledc, 0..255). NET-карточка не кликается (per-process трафик не собираем).
 - **Touch GT911** подключён к LVGL (indev pointer) — кнопки/слайдер работают.
 - LVGL-буфер — **single buffer** в PSRAM. Двойной буфер (2×480×200×2) на RGB-
   панели без tearing-control давал мерцание (панель сканирует свой фреймбуфер

@@ -68,12 +68,27 @@ static lv_obj_t *bar_disk;
 static lv_obj_t *lbl_disk;
 
 // ---------- PROC overlay ----------
+#define PROC_KINDS 5
+#define PROC_ROWS 10
+#define PROC_ENTRY_BYTES 22
+
 static lv_obj_t *ovl_proc;
-static lv_obj_t *proc_rows[10];
-static uint8_t g_proc_cpu[10];
-static uint16_t g_proc_pid[10];
-static char g_proc_name[10][17];
-static int g_proc_n = 0;
+static lv_obj_t *lbl_ovl_title;
+static lv_obj_t *proc_rows[PROC_ROWS];
+static uint32_t g_proc_val[PROC_KINDS][PROC_ROWS];
+static uint16_t g_proc_pid[PROC_KINDS][PROC_ROWS];
+static char g_proc_name[PROC_KINDS][PROC_ROWS][17];
+static int g_proc_n[PROC_KINDS];
+
+// views: what the overlay displays (DISK combines DISK_RD + DISK_WR slots)
+enum { VIEW_CPU = 0, VIEW_RAM, VIEW_GPU, VIEW_DISK };
+static int g_active_kind = VIEW_CPU;
+
+// cards (tappable -> proc breakdown)
+static lv_obj_t *card_cpu;
+static lv_obj_t *card_gpu;
+static lv_obj_t *card_ram;
+static lv_obj_t *card_disk;
 
 static lv_style_t style_card;
 static lv_style_t style_arc_bg;
@@ -157,6 +172,26 @@ static void set_label_font(lv_obj_t *lbl, const lv_font_t *font, lv_color_t colo
     lv_obj_set_style_text_color(lbl, color, 0);
 }
 
+// Transparent clickable layer over a card. Cards hold display-only children
+// (arcs, bars, labels) which would otherwise swallow the press, so the tap
+// catcher sits on top and forwards the event with a view id in user_data.
+static void card_tap_cb(lv_event_t *e);
+
+static void make_click_catcher(lv_obj_t *card, int view)
+{
+    lv_obj_t *ov = lv_obj_create(card);
+    lv_obj_set_size(ov, lv_obj_get_width(card), lv_obj_get_height(card));
+    lv_obj_set_pos(ov, 0, 0);
+    lv_obj_clear_flag(ov, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(ov, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_opa(ov, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ov, 0, 0);
+    lv_obj_set_style_shadow_opa(ov, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_radius(ov, 0, 0);
+    lv_obj_set_style_pad_all(ov, 0, 0);
+    lv_obj_add_event_cb(ov, card_tap_cb, LV_EVENT_PRESSED, (void *)(intptr_t)view);
+}
+
 // ---------- header ----------
 static void fmt_uptime(char *buf, size_t sz, uint32_t sec)
 {
@@ -192,20 +227,49 @@ static void sync_cores()
 // ---------- PROC overlay ----------
 static void rebuild_proc_rows();
 
-static void ovl_toggle()
+static int view_storage(int view)
 {
-    if (lv_obj_has_flag(ovl_proc, LV_OBJ_FLAG_HIDDEN)) {
-        rebuild_proc_rows();
-        lv_obj_clear_flag(ovl_proc, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(ovl_proc, LV_OBJ_FLAG_HIDDEN);
+    switch (view) {
+    case VIEW_CPU: return PROC_KIND_CPU;
+    case VIEW_RAM: return PROC_KIND_RAM;
+    case VIEW_GPU: return PROC_KIND_GPU;
+    default: return PROC_KIND_DISK_RD;
     }
+}
+
+static void ovl_close()
+{
+    lv_obj_add_flag(ovl_proc, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void ovl_open_view(int view)
+{
+    static const char *titles[] = {"TOP CPU", "TOP RAM", "TOP GPU", "TOP DISK (KiB/s)"};
+    if (view > VIEW_DISK) view = VIEW_CPU;
+    g_active_kind = view;
+    lv_label_set_text(lbl_ovl_title, titles[view]);
+    rebuild_proc_rows();
+    lv_obj_clear_flag(ovl_proc, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void ovl_toggle_cb(lv_event_t *e)
 {
     (void)e;
-    ovl_toggle();
+    if (lv_obj_has_flag(ovl_proc, LV_OBJ_FLAG_HIDDEN))
+        ovl_open_view(VIEW_CPU);
+    else
+        ovl_close();
+}
+
+static void ovl_close_cb(lv_event_t *e)
+{
+    (void)e;
+    ovl_close();
+}
+
+static void card_tap_cb(lv_event_t *e)
+{
+    ovl_open_view((int)(intptr_t)lv_event_get_user_data(e));
 }
 
 static void slider_bright_cb(lv_event_t *e)
@@ -320,7 +384,8 @@ void ui_init(int w, int h)
     int card_h = (grid_bottom - top - gap) / 2;
 
     // CPU card
-    lv_obj_t *cpu = make_card(scr, margin, top, card_w, card_h, "CPU");
+    card_cpu = make_card(scr, margin, top, card_w, card_h, "CPU");
+    lv_obj_t *cpu = card_cpu;
     arc_cpu = lv_arc_create(cpu);
     lv_obj_set_size(arc_cpu, 120, 120);
     lv_arc_set_range(arc_cpu, 0, 100);
@@ -355,9 +420,11 @@ void ui_init(int w, int h)
         lv_obj_set_style_radius(bar_cores[i], 2, LV_PART_INDICATOR);
         lv_obj_add_flag(bar_cores[i], LV_OBJ_FLAG_HIDDEN);
     }
+    make_click_catcher(card_cpu, VIEW_CPU);
 
     // GPU card
-    lv_obj_t *gpu = make_card(scr, margin + card_w + gap, top, card_w, card_h, "GPU");
+    card_gpu = make_card(scr, margin + card_w + gap, top, card_w, card_h, "GPU");
+    lv_obj_t *gpu = card_gpu;
     arc_gpu = lv_arc_create(gpu);
     lv_obj_set_size(arc_gpu, 120, 120);
     lv_arc_set_range(arc_gpu, 0, 100);
@@ -384,9 +451,11 @@ void ui_init(int w, int h)
     lv_label_set_text(lbl_vram, "0 / 0 MB");
     set_label_font(lbl_vram, &lv_font_montserrat_12, C_MUTED);
     lv_obj_align(lbl_vram, LV_ALIGN_BOTTOM_MID, 0, 0);
+    make_click_catcher(card_gpu, VIEW_GPU);
 
     // RAM card
-    lv_obj_t *ram = make_card(scr, margin, top + card_h + gap, card_w, card_h, "RAM");
+    card_ram = make_card(scr, margin, top + card_h + gap, card_w, card_h, "RAM");
+    lv_obj_t *ram = card_ram;
     bar_ram = lv_bar_create(ram);
     lv_obj_set_size(bar_ram, card_w - 30, 36);
     lv_obj_align(bar_ram, LV_ALIGN_CENTER, 0, -14);
@@ -400,6 +469,7 @@ void ui_init(int w, int h)
     lv_label_set_text(lbl_ram, "0 / 0 MB");
     set_label_font(lbl_ram, &lv_font_montserrat_14, C_TEXT);
     lv_obj_align(lbl_ram, LV_ALIGN_BOTTOM_MID, 0, -2);
+    make_click_catcher(card_ram, VIEW_RAM);
 
     // NET card
     lv_obj_t *net = make_card(scr, margin + card_w + gap, top + card_h + gap, card_w, card_h, "NET");
@@ -427,7 +497,8 @@ void ui_init(int w, int h)
     lv_obj_align(lbl_tx, LV_ALIGN_TOP_RIGHT, -6, 24);
 
     // ---------------- disk strip ----------------
-    lv_obj_t *disk = make_card(scr, margin, 480 - 56, w - 2 * margin, 46, "DISK");
+    card_disk = make_card(scr, margin, 480 - 56, w - 2 * margin, 46, "DISK");
+    lv_obj_t *disk = card_disk;
     lv_obj_set_style_radius(disk, 12, 0);
 
     bar_disk = lv_bar_create(disk);
@@ -443,6 +514,7 @@ void ui_init(int w, int h)
     lv_label_set_text(lbl_disk, "rd 0.0 / wr 0.0 MB/s");
     set_label_font(lbl_disk, &lv_font_montserrat_14, C_TEXT);
     lv_obj_align(lbl_disk, LV_ALIGN_RIGHT_MID, -10, 0);
+    make_click_catcher(card_disk, VIEW_DISK);
 
     // ---------------- PROC overlay ----------------
     ovl_proc = lv_obj_create(scr);
@@ -454,10 +526,10 @@ void ui_init(int w, int h)
     lv_obj_clear_flag(ovl_proc, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(ovl_proc, LV_OBJ_FLAG_HIDDEN);
 
-    lv_obj_t *ovl_title = lv_label_create(ovl_proc);
-    lv_label_set_text(ovl_title, "TOP PROCESSES");
-    set_label_font(ovl_title, &lv_font_montserrat_16, C_TEXT);
-    lv_obj_align(ovl_title, LV_ALIGN_TOP_MID, 0, 12);
+    lbl_ovl_title = lv_label_create(ovl_proc);
+    lv_label_set_text(lbl_ovl_title, "TOP CPU");
+    set_label_font(lbl_ovl_title, &lv_font_montserrat_16, C_TEXT);
+    lv_obj_align(lbl_ovl_title, LV_ALIGN_TOP_MID, 0, 12);
 
     for (int i = 0; i < 10; i++) {
         proc_rows[i] = lv_label_create(ovl_proc);
@@ -486,7 +558,7 @@ void ui_init(int w, int h)
     lv_obj_align(ovl_close, LV_ALIGN_TOP_RIGHT, -6, 8);
     lv_obj_add_style(ovl_close, &style_btn, LV_PART_MAIN);
     lv_obj_add_style(ovl_close, &style_btn_pr, LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_add_event_cb(ovl_close, ovl_toggle_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(ovl_close, ovl_close_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_t *close_lbl = lv_label_create(ovl_close);
     lv_label_set_text(close_lbl, "CLOSE");
     set_label_font(close_lbl, &lv_font_montserrat_14, C_MUTED);
@@ -508,10 +580,41 @@ void ui_init(int w, int h)
 static void rebuild_proc_rows()
 {
     if (!ovl_proc) return;
-    for (int i = 0; i < 10; i++) {
-        if (i < g_proc_n) {
+    int n = (g_active_kind == VIEW_DISK) ? g_proc_n[PROC_KIND_DISK_RD]
+                                         : g_proc_n[view_storage(g_active_kind)];
+    for (int i = 0; i < PROC_ROWS; i++) {
+        if (i < n) {
             char buf[64];
-            snprintf(buf, sizeof(buf), "%3u%% %5u %s", g_proc_cpu[i], g_proc_pid[i], g_proc_name[i]);
+            switch (g_active_kind) {
+            case VIEW_CPU:
+                snprintf(buf, sizeof(buf), "%3u%% %5u %s",
+                         (unsigned)g_proc_val[PROC_KIND_CPU][i],
+                         g_proc_pid[PROC_KIND_CPU][i],
+                         g_proc_name[PROC_KIND_CPU][i]);
+                break;
+            case VIEW_RAM:
+                snprintf(buf, sizeof(buf), "%6u MB %5u %s",
+                         (unsigned)g_proc_val[PROC_KIND_RAM][i],
+                         g_proc_pid[PROC_KIND_RAM][i],
+                         g_proc_name[PROC_KIND_RAM][i]);
+                break;
+            case VIEW_GPU:
+                snprintf(buf, sizeof(buf), "%6u MB %5u %s",
+                         (unsigned)g_proc_val[PROC_KIND_GPU][i],
+                         g_proc_pid[PROC_KIND_GPU][i],
+                         g_proc_name[PROC_KIND_GPU][i]);
+                break;
+            case VIEW_DISK:
+                snprintf(buf, sizeof(buf), "rd %5u wr %5u %5u %s",
+                         (unsigned)g_proc_val[PROC_KIND_DISK_RD][i],
+                         (unsigned)g_proc_val[PROC_KIND_DISK_WR][i],
+                         g_proc_pid[PROC_KIND_DISK_RD][i],
+                         g_proc_name[PROC_KIND_DISK_RD][i]);
+                break;
+            default:
+                buf[0] = '\0';
+                break;
+            }
             lv_label_set_text(proc_rows[i], buf);
         } else {
             lv_label_set_text(proc_rows[i], "");
@@ -615,22 +718,35 @@ void ui_set_header(uint32_t uptime_sec, uint32_t epoch_sec, const char *hostname
     lv_label_set_text(lbl_clock, buf);
 }
 
+static uint32_t rd_u32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
 void ui_set_proc(const uint8_t *data, uint16_t len)
 {
-    if (!data || len == 0) return;
-    int avail = (len - 1) / 19;
-    int n = data[0];
+    if (!data || len < 2) return;
+    uint8_t kind = data[0];
+    if (kind >= PROC_KINDS) return;
+    int n = data[1];
+    int avail = (len - 2) / PROC_ENTRY_BYTES;
     if (n > avail) n = avail;
-    if (n > 10) n = 10;
-    g_proc_n = n;
-    const uint8_t *p = data + 1;
+    if (n > PROC_ROWS) n = PROC_ROWS;
+    g_proc_n[kind] = n;
+    const uint8_t *p = data + 2;
     for (int i = 0; i < n; i++) {
-        g_proc_cpu[i] = p[0];
-        g_proc_pid[i] = p[1] | ((uint16_t)p[2] << 8);
-        memcpy(g_proc_name[i], p + 3, 16);
-        g_proc_name[i][15] = '\0';
-        p += 19;
+        g_proc_val[kind][i] = rd_u32(p);
+        g_proc_pid[kind][i] = p[4] | ((uint16_t)p[5] << 8);
+        memcpy(g_proc_name[kind][i], p + 6, 16);
+        g_proc_name[kind][i][15] = '\0';
+        p += PROC_ENTRY_BYTES;
     }
-    if (ovl_proc && !lv_obj_has_flag(ovl_proc, LV_OBJ_FLAG_HIDDEN))
-        rebuild_proc_rows();
+    if (ovl_proc && !lv_obj_has_flag(ovl_proc, LV_OBJ_FLAG_HIDDEN)) {
+        bool relevant = (kind == view_storage(g_active_kind)) ||
+                        (g_active_kind == VIEW_DISK &&
+                         (kind == PROC_KIND_DISK_RD || kind == PROC_KIND_DISK_WR));
+        if (relevant)
+            rebuild_proc_rows();
+    }
 }

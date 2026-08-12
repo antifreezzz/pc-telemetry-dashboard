@@ -25,6 +25,8 @@ from host.protocol import (
     build_header, build_proc,
     FIELD_CPU, FIELD_RAM, FIELD_GPU, FIELD_NET, FIELD_DISK, FIELD_HEADER,
     FIELD_PROC,
+    PROC_KIND_CPU, PROC_KIND_RAM, PROC_KIND_GPU,
+    PROC_KIND_DISK_RD, PROC_KIND_DISK_WR,
 )
 
 PORT = "/dev/ttyUSB0"
@@ -40,7 +42,15 @@ def send_one_frame(ser, snaps):
         (FIELD_NET, build_net(*snaps["net"])),
         (FIELD_DISK, build_disk(*snaps["disk"])),
         (FIELD_HEADER, build_header(*snaps["header"])),
-        (FIELD_PROC, build_proc(snaps["proc"])),
+        (FIELD_PROC, build_proc(PROC_KIND_CPU, snaps["proc_cpu"])),
+        (FIELD_PROC, build_proc(PROC_KIND_RAM, snaps["proc_ram"])),
+        (FIELD_PROC, build_proc(PROC_KIND_GPU, snaps["proc_gpu"])),
+        (FIELD_PROC, build_proc(PROC_KIND_DISK_RD,
+                                [(rd, pid, name)
+                                 for rd, _wr, pid, name in snaps["proc_disk"]])),
+        (FIELD_PROC, build_proc(PROC_KIND_DISK_WR,
+                                [(wr, pid, name)
+                                 for _rd, wr, pid, name in snaps["proc_disk"]])),
     ]
     ser.write(pack_frame(fields))
 
@@ -49,6 +59,7 @@ def sender(ser, stop, monitor):
     """Build and send one batched v2 frame every 500ms."""
     net_prev = psutil.net_io_counters()
     disk_prev = psutil.disk_io_counters()
+    io_tracker = metrics.ProcIoTracker()
     seq = 0
     while not stop.is_set():
         try:
@@ -62,7 +73,10 @@ def sender(ser, stop, monitor):
                 "net": metrics.net_snapshot(net_prev, net_now, interval),
                 "disk": metrics.disk_snapshot(disk_prev, disk_now, interval),
                 "header": metrics.header_snapshot(),
-                "proc": metrics.proc_snapshot(),
+                "proc_cpu": metrics.proc_cpu_snapshot(),
+                "proc_ram": metrics.proc_mem_snapshot(),
+                "proc_gpu": metrics.proc_gpu_snapshot(monitor),
+                "proc_disk": io_tracker.snapshot(interval),
             }
             send_one_frame(ser, snaps)
             net_prev = net_now
