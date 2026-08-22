@@ -3,15 +3,18 @@
 #include <Preferences.h>
 #include <freertos/queue.h>
 
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#include "secrets.example.h"
+#endif
+
 // ---------------------------------------------------------------------------
 // Device config
 // ---------------------------------------------------------------------------
-static const uint8_t TARGET_MAC[6] = {0xDC, 0x23, 0x4F, 0xBE, 0x93, 0x71};
-static const char *LOCAL_KEY_ASCII = "36C8F18EDEBA3CD5";
-// The bulb only obeys a controller whose advertised Local Name matches the
-// name it was bound with.  Must be <=8 chars: Flags(3) + Name(2+n) + UUID(18)
-// must fit inside the 31-byte advert.
-static const char *CTRL_NAME = "3CNPvpNx";
+static const uint8_t TARGET_MAC[6] = TUYA_LAMP_MAC;
+static const char *LOCAL_KEY_ASCII = TUYA_LOCAL_KEY;
+static const char *CTRL_NAME = TUYA_CTRL_NAME;
 
 // Timing from the verified reference (tuya-beacon-esphome).
 #define TRACK_MS  300    // dwell for a single tracked command (scan is stopped during emit)

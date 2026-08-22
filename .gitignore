@@ -2,6 +2,9 @@
 firmware/.pio/
 firmware/test/
 
+# Secrets
+firmware/src/secrets.h
+
 # Python
 __pycache__/
 *.pyc
