@@ -199,3 +199,13 @@ void protocol_send_start_model(const char *model_id)
         Serial.printf("CMD:START_MODEL:%s\n", model_id);
     }
 }
+
+void protocol_send_start_model_profile(const char *model_id, const char *profile)
+{
+    if (!model_id || !*model_id) return;
+    if (profile && *profile) {
+        Serial.printf("CMD:START_MODEL:%s:%s\n", model_id, profile);
+    } else {
+        Serial.printf("CMD:START_MODEL:%s\n", model_id);
+    }
+}

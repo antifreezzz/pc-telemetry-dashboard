@@ -110,8 +110,13 @@ def _execute_cmd(cmd, arg, llm_mon: LLMMonitor) -> None:
         print("[host] command from ESP32: START FAVORITE model", flush=True)
         llm_mon.start_favorite()
     elif cmd == "START_MODEL" and arg:
-        print(f"[host] command from ESP32: START MODEL {arg}", flush=True)
-        llm_mon.start_model(arg)
+        if ":" in arg:
+            model_id, profile = arg.split(":", 1)
+            print(f"[host] command from ESP32: START MODEL {model_id} (profile={profile})", flush=True)
+            llm_mon.start_model(model_id.strip(), profile=profile.strip())
+        else:
+            print(f"[host] command from ESP32: START MODEL {arg}", flush=True)
+            llm_mon.start_model(arg.strip())
 
 
 def process_incoming_serial(ser: serial.Serial, rx_buf: bytes, llm_mon: LLMMonitor) -> bytes:

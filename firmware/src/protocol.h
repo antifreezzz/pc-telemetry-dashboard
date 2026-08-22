@@ -37,3 +37,4 @@ void protocol_init();
 void protocol_poll();  // call from loop()
 void protocol_send_cmd(uint8_t cmd_id);
 void protocol_send_start_model(const char *model_id);
+void protocol_send_start_model_profile(const char *model_id, const char *profile);
