@@ -136,6 +136,8 @@ class LLMMonitor:
         self._status = LLM_STATUS_OFFLINE
         self._tps = 0.0
         self._active_model = ""
+        self._models: List[Dict[str, Any]] = []
+        self._last_models_fetch = 0.0
         self._running = True
         self._thread = threading.Thread(target=self._worker, daemon=True, name="LLMMonitor")
         self._thread.start()
@@ -144,6 +146,12 @@ class LLMMonitor:
         while self._running:
             try:
                 status_dict = self.client.get_status()
+                now = time.time()
+                models_list = None
+                if now - self._last_models_fetch > 2.0:
+                    models_list = self.client.get_models()
+                    self._last_models_fetch = now
+
                 if status_dict is not None:
                     raw_status = status_dict.get("status", "idle")
                     active_model = status_dict.get("active_model") or ""
@@ -153,11 +161,15 @@ class LLMMonitor:
                         self._status = code
                         self._tps = max(0.0, tps)
                         self._active_model = active_model
+                        if models_list is not None:
+                            self._models = models_list
                 else:
                     with self._lock:
                         self._status = LLM_STATUS_OFFLINE
                         self._tps = 0.0
                         self._active_model = ""
+                        if models_list is not None:
+                            self._models = models_list
             except Exception as e:
                 logger.debug("LLMMonitor worker loop error: %s", e)
                 with self._lock:
@@ -175,6 +187,11 @@ class LLMMonitor:
         """Return (status_code, tps, active_model). Non-blocking and thread-safe."""
         with self._lock:
             return self._status, self._tps, self._active_model
+
+    def models_snapshot(self) -> List[Dict[str, Any]]:
+        """Return list of models. Non-blocking and thread-safe."""
+        with self._lock:
+            return list(self._models)
 
     def stop_all(self) -> bool:
         """Issue stop-all command via client, update local snapshot immediately."""

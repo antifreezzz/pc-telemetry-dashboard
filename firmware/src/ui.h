@@ -10,3 +10,5 @@ void ui_set_disk(uint32_t rd_kibs, uint32_t wr_kibs, int used_pct);
 void ui_set_header(uint32_t uptime_sec, uint32_t epoch_sec, const char *hostname);
 void ui_set_proc(const uint8_t *data, uint16_t len);
 void ui_set_llm(uint8_t status, float tps, const char *model);
+void ui_set_llm_models(const uint8_t *data, uint16_t len);
+void ui_open_llm_menu();

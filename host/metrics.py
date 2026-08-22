@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
-"""Pure metric collection (no serial dependency)."""
-
 import os
 import time
+from typing import Any, Tuple
 
 import psutil
+
+from host.protocol import LLM_STATUS_OFFLINE
 
 
 def _mb(value: int) -> int:
@@ -174,3 +174,21 @@ class ProcIoTracker:
         self._prev = now
         raw.sort(key=lambda t: t[0], reverse=True)
         return [(rd, wr, pid, name) for _tot, rd, wr, pid, name in raw[:n]]
+
+
+def llm_snapshot(monitor: Any) -> Tuple[int, float, str]:
+    if monitor is None:
+        return LLM_STATUS_OFFLINE, 0.0, ""
+    try:
+        return monitor.snapshot()
+    except Exception:
+        return LLM_STATUS_OFFLINE, 0.0, ""
+
+
+def llm_models_snapshot(monitor: Any) -> list:
+    if monitor is None:
+        return []
+    try:
+        return monitor.models_snapshot()
+    except Exception:
+        return []

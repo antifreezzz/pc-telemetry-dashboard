@@ -29,6 +29,7 @@ FIELD_DISK = 0x05
 FIELD_HEADER = 0x06
 FIELD_PROC = 0x07
 FIELD_LLM = 0x08
+FIELD_LLM_MODELS = 0x09
 
 PROC_KIND_CPU = 0
 PROC_KIND_RAM = 1
@@ -49,6 +50,7 @@ N_NA = 255
 _HOSTNAME_LEN = 24
 _PROC_NAME_LEN = 16
 _MODEL_NAME_LEN = 24
+_MODEL_ID_LEN = 16
 
 
 def crc8(data: bytes) -> int:
@@ -148,6 +150,34 @@ def build_llm(status: int, tps: float, model: str) -> bytes:
         st = min(255, max(0, int(status)))
     tps_x10 = _u16(int(round(max(0.0, float(tps)) * 10)))
     return struct.pack("<BH", st, tps_x10) + _block(model, _MODEL_NAME_LEN)
+
+
+def build_llm_models(models: list) -> bytes:
+    """Pack models list for ESP32 selector screen.
+    
+    Layout: [count:u8] followed by count x [id:16s][is_fav:u8][status:u8]
+    status: 0=stopped, 1=running, 2=starting.
+    """
+    if not models:
+        return bytes([0])
+    
+    clamped = models[:16]
+    data = bytearray([len(clamped)])
+    for m in clamped:
+        m_id = m.get("id") or m.get("name") or ""
+        is_fav = 1 if m.get("is_favorite") else 0
+        rt = m.get("runtime") or {}
+        st_str = (rt.get("status") or "").lower()
+        if st_str == "running":
+            st_val = 1
+        elif st_str in ("starting", "loading"):
+            st_val = 2
+        else:
+            st_val = 0
+        
+        data += _block(m_id, _MODEL_ID_LEN)
+        data += bytes([is_fav, st_val])
+    return bytes(data)
 
 
 def build_proc(kind: int, entries: list) -> bytes:

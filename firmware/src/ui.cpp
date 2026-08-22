@@ -95,12 +95,29 @@ static uint8_t g_llm_status = 255;
 static float g_llm_tps = 0.0f;
 static char g_llm_model[25] = {0};
 
+// ---------- LLM models list & overlay ----------
+struct LlmModelItem {
+    char id[17];
+    uint8_t is_fav;
+    uint8_t status;
+};
+static LlmModelItem g_llm_models[16];
+static int g_llm_models_count = 0;
+
+static lv_obj_t *ovl_llm;
+static lv_obj_t *lbl_llm_ovl_status;
+static lv_obj_t *cont_llm_models;
+static lv_obj_t *btn_llm_models[16];
+static lv_obj_t *lbl_llm_models[16];
+
 static lv_style_t style_card;
 static lv_style_t style_arc_bg;
 static lv_style_t style_arc_indic;
 static lv_style_t style_caption;
 static lv_style_t style_btn;
 static lv_style_t style_btn_pr;
+static lv_style_t style_btn_red;
+static lv_style_t style_btn_green;
 
 static void my_disp_flush(lv_disp_drv_t *d, const lv_area_t *a, lv_color_t *c)
 {
@@ -153,6 +170,22 @@ static void style_init()
     lv_style_set_border_color(&style_btn_pr, C_CYAN);
     lv_style_set_text_color(&style_btn_pr, C_BG);
     lv_style_set_translate_y(&style_btn_pr, 1);
+
+    // red action button
+    lv_style_init(&style_btn_red);
+    lv_style_set_bg_color(&style_btn_red, lv_color_hex(0x381216));
+    lv_style_set_border_color(&style_btn_red, lv_color_hex(0xef4444));
+    lv_style_set_border_width(&style_btn_red, 1);
+    lv_style_set_radius(&style_btn_red, 10);
+    lv_style_set_text_color(&style_btn_red, lv_color_hex(0xef4444));
+
+    // green action button
+    lv_style_init(&style_btn_green);
+    lv_style_set_bg_color(&style_btn_green, lv_color_hex(0x113322));
+    lv_style_set_border_color(&style_btn_green, lv_color_hex(0x10b981));
+    lv_style_set_border_width(&style_btn_green, 1);
+    lv_style_set_radius(&style_btn_green, 10);
+    lv_style_set_text_color(&style_btn_green, lv_color_hex(0x10b981));
 }
 
 static lv_obj_t *make_card(lv_obj_t *parent, int x, int y, int w, int h, const char *caption)
@@ -267,6 +300,65 @@ static void ovl_close_cb(lv_event_t *e)
     ovl_close();
 }
 
+// ---------- LLM overlay helpers ----------
+static void rebuild_llm_model_buttons();
+
+static void ovl_close_llm()
+{
+    if (ovl_llm) lv_obj_add_flag(ovl_llm, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void ovl_open_llm()
+{
+    if (!ovl_llm) return;
+    rebuild_llm_model_buttons();
+    lv_obj_clear_flag(ovl_llm, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_open_llm_menu()
+{
+    ovl_open_llm();
+}
+
+static void ovl_llm_toggle_cb(lv_event_t *e)
+{
+    (void)e;
+    if (ovl_llm && lv_obj_has_flag(ovl_llm, LV_OBJ_FLAG_HIDDEN))
+        ovl_open_llm();
+    else
+        ovl_close_llm();
+}
+
+static void ovl_llm_close_cb(lv_event_t *e)
+{
+    (void)e;
+    ovl_close_llm();
+}
+
+static void btn_stop_all_cb(lv_event_t *e)
+{
+    (void)e;
+    protocol_send_cmd(CMD_STOP_ALL);
+}
+
+static void btn_start_fav_cb(lv_event_t *e)
+{
+    (void)e;
+    protocol_send_cmd(CMD_START_FAVORITE);
+}
+
+static void model_btn_tap_cb(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx >= 0 && idx < g_llm_models_count) {
+        if (g_llm_models[idx].status == LLM_STATUS_RUNNING || g_llm_models[idx].status == LLM_STATUS_STARTING) {
+            protocol_send_cmd(CMD_STOP_ALL);
+        } else {
+            protocol_send_start_model(g_llm_models[idx].id);
+        }
+    }
+}
+
 static void card_tap_cb(lv_event_t *e)
 {
     int view = (int)(intptr_t)lv_event_get_user_data(e);
@@ -369,13 +461,13 @@ void ui_init(int w, int h)
     lv_obj_align(btn_proc, LV_ALIGN_TOP_RIGHT, -6, 5);
     lv_obj_add_style(btn_proc, &style_btn, LV_PART_MAIN);
     lv_obj_add_style(btn_proc, &style_btn_pr, LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_add_event_cb(btn_proc, ovl_toggle_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(btn_proc, ovl_llm_toggle_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_t *btn_lbl = lv_label_create(btn_proc);
-    lv_label_set_text(btn_lbl, "PROC");
-    set_label_font(btn_lbl, &lv_font_montserrat_14, C_MUTED);
+    lv_label_set_text(btn_lbl, "LLM");
+    set_label_font(btn_lbl, &lv_font_montserrat_14, C_CYAN);
     lv_obj_center(btn_lbl);
 
-    // header hostname/left area also toggles the overlay
+    // header hostname/left area toggles the proc overlay
     lv_obj_add_event_cb(lbl_hostname, ovl_toggle_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(lbl_uptime, ovl_toggle_cb, LV_EVENT_PRESSED, NULL);
 
@@ -537,12 +629,104 @@ void ui_init(int w, int h)
     lv_obj_align(lbl_llm, LV_ALIGN_CENTER, 0, 4);
 
     lv_obj_add_event_cb(card_llm, [](lv_event_t *e) {
-        if (g_llm_status == LLM_STATUS_RUNNING || g_llm_status == LLM_STATUS_STARTING) {
-            protocol_send_cmd(CMD_STOP_ALL);
-        } else {
-            protocol_send_cmd(CMD_START_FAVORITE);
-        }
+        ovl_open_llm();
     }, LV_EVENT_PRESSED, NULL);
+
+    // ---------------- LLM overlay ----------------
+    ovl_llm = lv_obj_create(scr);
+    lv_obj_set_size(ovl_llm, w, h);
+    lv_obj_set_pos(ovl_llm, 0, 0);
+    lv_obj_set_style_bg_color(ovl_llm, lv_color_hex(0x0a0d12), 0);
+    lv_obj_set_style_radius(ovl_llm, 0, 0);
+    lv_obj_set_style_border_width(ovl_llm, 0, 0);
+    lv_obj_clear_flag(ovl_llm, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(ovl_llm, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *lbl_llm_title = lv_label_create(ovl_llm);
+    lv_label_set_text(lbl_llm_title, "LLM CONTROL");
+    set_label_font(lbl_llm_title, &lv_font_montserrat_16, C_CYAN);
+    lv_obj_align(lbl_llm_title, LV_ALIGN_TOP_LEFT, 18, 14);
+
+    lv_obj_t *btn_llm_close = lv_btn_create(ovl_llm);
+    lv_obj_set_size(btn_llm_close, 90, 36);
+    lv_obj_align(btn_llm_close, LV_ALIGN_TOP_RIGHT, -12, 8);
+    lv_obj_add_style(btn_llm_close, &style_btn, LV_PART_MAIN);
+    lv_obj_add_style(btn_llm_close, &style_btn_pr, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_event_cb(btn_llm_close, ovl_llm_close_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_t *lbl_close = lv_label_create(btn_llm_close);
+    lv_label_set_text(lbl_close, "CLOSE");
+    set_label_font(lbl_close, &lv_font_montserrat_14, C_MUTED);
+    lv_obj_center(lbl_close);
+
+    // Stop All button
+    lv_obj_t *btn_stop = lv_btn_create(ovl_llm);
+    lv_obj_set_size(btn_stop, 130, 36);
+    lv_obj_align(btn_stop, LV_ALIGN_TOP_LEFT, 18, 50);
+    lv_obj_add_style(btn_stop, &style_btn_red, 0);
+    lv_obj_add_event_cb(btn_stop, btn_stop_all_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_t *lbl_s = lv_label_create(btn_stop);
+    lv_label_set_text(lbl_s, "STOP ALL");
+    set_label_font(lbl_s, &lv_font_montserrat_14, lv_color_hex(0xef4444));
+    lv_obj_center(lbl_s);
+
+    // Start Favorite button
+    lv_obj_t *btn_fav = lv_btn_create(ovl_llm);
+    lv_obj_set_size(btn_fav, 130, 36);
+    lv_obj_align(btn_fav, LV_ALIGN_TOP_LEFT, 158, 50);
+    lv_obj_add_style(btn_fav, &style_btn_green, 0);
+    lv_obj_add_event_cb(btn_fav, btn_start_fav_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_t *lbl_f = lv_label_create(btn_fav);
+    lv_label_set_text(lbl_f, "START FAV");
+    set_label_font(lbl_f, &lv_font_montserrat_14, lv_color_hex(0x10b981));
+    lv_obj_center(lbl_f);
+
+    // Status line
+    lbl_llm_ovl_status = lv_label_create(ovl_llm);
+    lv_label_set_text(lbl_llm_ovl_status, "Status: IDLE");
+    set_label_font(lbl_llm_ovl_status, &lv_font_montserrat_14, C_MUTED);
+    lv_obj_align(lbl_llm_ovl_status, LV_ALIGN_TOP_LEFT, 18, 94);
+
+    // Models container (scrollable flex grid)
+    cont_llm_models = lv_obj_create(ovl_llm);
+    lv_obj_set_size(cont_llm_models, 444, 290);
+    lv_obj_align(cont_llm_models, LV_ALIGN_TOP_MID, 0, 120);
+    lv_obj_set_style_bg_opa(cont_llm_models, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cont_llm_models, 0, 0);
+    lv_obj_set_style_pad_all(cont_llm_models, 2, 0);
+    lv_obj_set_style_pad_row(cont_llm_models, 6, 0);
+    lv_obj_set_style_pad_column(cont_llm_models, 8, 0);
+    lv_obj_set_layout(cont_llm_models, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(cont_llm_models, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(cont_llm_models, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    for (int i = 0; i < 16; i++) {
+        btn_llm_models[i] = lv_btn_create(cont_llm_models);
+        lv_obj_set_size(btn_llm_models[i], 210, 42);
+        lv_obj_add_style(btn_llm_models[i], &style_btn, LV_PART_MAIN);
+        lv_obj_add_style(btn_llm_models[i], &style_btn_pr, LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_add_event_cb(btn_llm_models[i], model_btn_tap_cb, LV_EVENT_PRESSED, (void *)(intptr_t)i);
+        lbl_llm_models[i] = lv_label_create(btn_llm_models[i]);
+        lv_label_set_text(lbl_llm_models[i], "");
+        set_label_font(lbl_llm_models[i], &lv_font_montserrat_14, C_TEXT);
+        lv_obj_center(lbl_llm_models[i]);
+        lv_obj_add_flag(btn_llm_models[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Brightness slider at bottom of LLM overlay
+    lv_obj_t *ovl_llm_brlbl = lv_label_create(ovl_llm);
+    lv_label_set_text(ovl_llm_brlbl, "BRIGHTNESS");
+    set_label_font(ovl_llm_brlbl, &lv_font_montserrat_14, C_MUTED);
+    lv_obj_align(ovl_llm_brlbl, LV_ALIGN_BOTTOM_LEFT, 18, -14);
+
+    lv_obj_t *ovl_llm_slider = lv_slider_create(ovl_llm);
+    lv_obj_set_size(ovl_llm_slider, w - 160, 14);
+    lv_obj_align(ovl_llm_slider, LV_ALIGN_BOTTOM_LEFT, 138, -14);
+    lv_slider_set_range(ovl_llm_slider, 0, 255);
+    lv_slider_set_value(ovl_llm_slider, 150, LV_ANIM_OFF);
+    lv_obj_add_event_cb(ovl_llm_slider, slider_bright_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_set_style_bg_color(ovl_llm_slider, C_ARC_BG, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(ovl_llm_slider, C_CYAN, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(ovl_llm_slider, C_TEXT, LV_PART_KNOB);
 
     // ---------------- PROC overlay ----------------
     ovl_proc = lv_obj_create(scr);
@@ -810,5 +994,84 @@ void ui_set_llm(uint8_t status, float tps, const char *model)
         set_label_font(lbl_llm, &lv_font_montserrat_12, C_DIM);
     }
     lv_label_set_text(lbl_llm, buf);
+
+    if (ovl_llm && !lv_obj_has_flag(ovl_llm, LV_OBJ_FLAG_HIDDEN)) {
+        rebuild_llm_model_buttons();
+    }
+}
+
+static void rebuild_llm_model_buttons()
+{
+    if (!cont_llm_models || !lbl_llm_ovl_status) return;
+
+    char st_buf[64];
+    if (g_llm_status == LLM_STATUS_RUNNING) {
+        if (g_llm_tps > 0.0f) {
+            snprintf(st_buf, sizeof(st_buf), "Active: %s (%.1f tok/s)", g_llm_model, g_llm_tps);
+        } else {
+            snprintf(st_buf, sizeof(st_buf), "Active: %s [RUNNING]", g_llm_model);
+        }
+        set_label_font(lbl_llm_ovl_status, &lv_font_montserrat_14, C_GREEN);
+    } else if (g_llm_status == LLM_STATUS_STARTING) {
+        snprintf(st_buf, sizeof(st_buf), "Loading: %s...", g_llm_model);
+        set_label_font(lbl_llm_ovl_status, &lv_font_montserrat_14, C_AMBER);
+    } else if (g_llm_status == LLM_STATUS_IDLE) {
+        snprintf(st_buf, sizeof(st_buf), "Status: IDLE (Tap model to start)");
+        set_label_font(lbl_llm_ovl_status, &lv_font_montserrat_14, C_MUTED);
+    } else {
+        snprintf(st_buf, sizeof(st_buf), "Status: Offline (llmcontrol disconnected)");
+        set_label_font(lbl_llm_ovl_status, &lv_font_montserrat_14, C_DIM);
+    }
+    lv_label_set_text(lbl_llm_ovl_status, st_buf);
+
+    for (int i = 0; i < 16; i++) {
+        if (i < g_llm_models_count) {
+            lv_obj_clear_flag(btn_llm_models[i], LV_OBJ_FLAG_HIDDEN);
+            char btn_text[32];
+            const char *prefix = g_llm_models[i].is_fav ? "*" : "";
+            if (g_llm_models[i].status == LLM_STATUS_RUNNING) {
+                snprintf(btn_text, sizeof(btn_text), "> %s%s", prefix, g_llm_models[i].id);
+                lv_obj_set_style_border_color(btn_llm_models[i], C_GREEN, 0);
+                lv_obj_set_style_border_width(btn_llm_models[i], 2, 0);
+                set_label_font(lbl_llm_models[i], &lv_font_montserrat_14, C_GREEN);
+            } else if (g_llm_models[i].status == LLM_STATUS_STARTING) {
+                snprintf(btn_text, sizeof(btn_text), "... %s%s", prefix, g_llm_models[i].id);
+                lv_obj_set_style_border_color(btn_llm_models[i], C_AMBER, 0);
+                lv_obj_set_style_border_width(btn_llm_models[i], 2, 0);
+                set_label_font(lbl_llm_models[i], &lv_font_montserrat_14, C_AMBER);
+            } else {
+                snprintf(btn_text, sizeof(btn_text), "%s%s", prefix, g_llm_models[i].id);
+                lv_obj_set_style_border_color(btn_llm_models[i], C_ARC_BG, 0);
+                lv_obj_set_style_border_width(btn_llm_models[i], 1, 0);
+                set_label_font(lbl_llm_models[i], &lv_font_montserrat_14, g_llm_models[i].is_fav ? C_AMBER : C_TEXT);
+            }
+            lv_label_set_text(lbl_llm_models[i], btn_text);
+        } else {
+            lv_obj_add_flag(btn_llm_models[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+void ui_set_llm_models(const uint8_t *data, uint16_t len)
+{
+    if (!data || len < 1) return;
+    uint8_t count = data[0];
+    int avail = (len - 1) / 18;
+    if (count > avail) count = avail;
+    if (count > 16) count = 16;
+    g_llm_models_count = count;
+
+    const uint8_t *p = data + 1;
+    for (int i = 0; i < count; i++) {
+        memcpy(g_llm_models[i].id, p, 16);
+        g_llm_models[i].id[15] = '\0';
+        g_llm_models[i].is_fav = p[16];
+        g_llm_models[i].status = p[17];
+        p += 18;
+    }
+
+    if (ovl_llm && !lv_obj_has_flag(ovl_llm, LV_OBJ_FLAG_HIDDEN)) {
+        rebuild_llm_model_buttons();
+    }
 }
 

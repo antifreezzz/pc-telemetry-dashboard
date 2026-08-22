@@ -13,6 +13,7 @@
 #define FIELD_HEADER 0x06
 #define FIELD_PROC 0x07
 #define FIELD_LLM 0x08
+#define FIELD_LLM_MODELS 0x09
 
 #define PROC_KIND_CPU 0
 #define PROC_KIND_RAM 1
@@ -35,3 +36,4 @@ extern char g_hostname[24];
 void protocol_init();
 void protocol_poll();  // call from loop()
 void protocol_send_cmd(uint8_t cmd_id);
+void protocol_send_start_model(const char *model_id);

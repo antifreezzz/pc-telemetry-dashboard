@@ -34,6 +34,7 @@ from host.protocol import (
     FIELD_HEADER,
     FIELD_PROC,
     FIELD_LLM,
+    FIELD_LLM_MODELS,
     PROC_KIND_CPU,
     PROC_KIND_RAM,
     PROC_KIND_GPU,
@@ -53,6 +54,7 @@ from host.protocol import (
     build_header,
     build_proc,
     build_llm,
+    build_llm_models,
 )
 
 DEFAULT_PORT = "/dev/ttyUSB0"
@@ -95,6 +97,7 @@ def build_frame(snaps: dict, interval: float) -> bytes:
                                 [(wr, pid, name)
                                  for _rd, wr, pid, name in snaps["proc_disk"]])),
         (FIELD_LLM, build_llm(*snaps["llm"])),
+        (FIELD_LLM_MODELS, build_llm_models(snaps["llm_models"])),
     ]
     return pack_frame(fields)
 
@@ -192,6 +195,7 @@ def main() -> None:
                 "proc_gpu": metrics.proc_gpu_snapshot(gpu_monitor),
                 "proc_disk": io_tracker.snapshot(elapsed),
                 "llm": metrics.llm_snapshot(llm_monitor),
+                "llm_models": metrics.llm_models_snapshot(llm_monitor),
             }
             net_prev = net_now
             disk_prev = disk_now

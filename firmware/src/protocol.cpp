@@ -99,6 +99,9 @@ static bool handle_payload(const uint8_t *p, uint16_t len)
                 ui_set_llm(status, tps_x10 / 10.0f, model_buf);
             }
             break;
+        case FIELD_LLM_MODELS:
+            ui_set_llm_models(&p[pos], flen);
+            break;
         default:
             break;  // unknown field id: skip via field_len
         }
@@ -187,5 +190,12 @@ void protocol_send_cmd(uint8_t cmd_id)
         Serial.println("CMD:STOP_ALL");
     } else if (cmd_id == CMD_START_FAVORITE) {
         Serial.println("CMD:START_FAVORITE");
+    }
+}
+
+void protocol_send_start_model(const char *model_id)
+{
+    if (model_id && *model_id) {
+        Serial.printf("CMD:START_MODEL:%s\n", model_id);
     }
 }

@@ -7,6 +7,7 @@ Run: python3 host/test_unit.py
 import os
 import struct
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -757,6 +758,30 @@ class TestLlmSnapshot(unittest.TestCase):
             def snapshot(self):
                 return (LLM_STATUS_RUNNING, 42.0, "m")
         self.assertEqual(metrics.llm_snapshot(_FakeMon()), (LLM_STATUS_RUNNING, 42.0, "m"))
+
+
+class TestLlmModelsTelemetry(unittest.TestCase):
+    def test_build_empty_models(self):
+        from host.protocol import build_llm_models
+        data = build_llm_models([])
+        self.assertEqual(data, b"\x00")
+
+    def test_build_models_serialization(self):
+        from host.protocol import build_llm_models
+        models = [
+            {"id": "gemma4", "is_favorite": True, "runtime": {"status": "running"}},
+            {"id": "cyber", "is_favorite": False, "runtime": {"status": "stopped"}},
+        ]
+        data = build_llm_models(models)
+        self.assertEqual(data[0], 2) # count
+        # first model: 16 bytes name + 1 byte is_fav + 1 byte status
+        self.assertEqual(data[1:8], b"gemma4\x00")
+        self.assertEqual(data[17], 1) # is_fav = 1
+        self.assertEqual(data[18], 1) # status = 1 (running)
+        # second model:
+        self.assertEqual(data[19:25], b"cyber\x00")
+        self.assertEqual(data[35], 0) # is_fav = 0
+        self.assertEqual(data[36], 0) # status = 0 (stopped)
 
 
 if __name__ == "__main__":
