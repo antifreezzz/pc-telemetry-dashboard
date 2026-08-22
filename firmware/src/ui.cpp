@@ -2,6 +2,7 @@
 #include "panel.h"
 #include "protocol.h"
 #include "touch.h"
+#include "ble_lamp.h"
 #include <Arduino.h>
 #include <string.h>
 
@@ -31,6 +32,7 @@ static lv_obj_t *lbl_uptime;
 static lv_obj_t *lbl_clock;
 static lv_obj_t *lbl_fps;
 static lv_obj_t *btn_proc;
+static lv_obj_t *btn_lamp_hdr;
 
 static char g_hostname_local[24];
 static bool g_hdr_init = false;
@@ -80,11 +82,11 @@ static uint16_t g_proc_pid[PROC_KINDS][PROC_ROWS];
 static char g_proc_name[PROC_KINDS][PROC_ROWS][17];
 static int g_proc_n[PROC_KINDS];
 
-// views: what the overlay displays (DISK combines DISK_RD + DISK_WR slots)
+// views: what the overlay displays
 enum { VIEW_CPU = 0, VIEW_RAM, VIEW_GPU, VIEW_DISK };
 static int g_active_kind = VIEW_CPU;
 
-// cards (tappable -> proc breakdown)
+// cards
 static lv_obj_t *card_cpu;
 static lv_obj_t *card_gpu;
 static lv_obj_t *card_ram;
@@ -127,6 +129,17 @@ static lv_obj_t *btn_profiles[6];
 static lv_obj_t *lbl_profiles_title[6];
 static lv_obj_t *lbl_profiles_desc[6];
 
+// ---------- LAMP Modal (ovl_lamp) ----------
+static lv_obj_t *ovl_lamp;
+static lv_obj_t *btn_lamp_power;
+static lv_obj_t *lbl_lamp_power;
+static lv_obj_t *lbl_lamp_bright_val;
+static lv_obj_t *slider_lamp_bright;
+static lv_obj_t *lbl_lamp_cct_val;
+static lv_obj_t *slider_lamp_cct;
+static lv_obj_t *sw_ambient_sync;
+static bool g_lamp_ui_power = true;
+
 static lv_style_t style_card;
 static lv_style_t style_arc_bg;
 static lv_style_t style_arc_indic;
@@ -143,16 +156,6 @@ static void my_disp_flush(lv_disp_drv_t *d, const lv_area_t *a, lv_color_t *c)
     gfx->draw16bitRGBBitmap(a->x1, a->y1, (uint16_t *)&c->full, w, h);
     lv_disp_flush_ready(d);
     g_flush_cnt++;
-#ifdef PROTO_DEBUG
-    static uint32_t flush_cnt = 0;
-    static uint32_t last_rep = 0;
-    flush_cnt++;
-    uint32_t now = millis();
-    if (now - last_rep >= 1000) {
-        Serial.printf("FLUSH %u area=%d,%u %dx%d\n", flush_cnt, a->x1, a->y1, w, h);
-        last_rep = now;
-    }
-#endif
 }
 
 static void style_init()
@@ -174,7 +177,6 @@ static void style_init()
     lv_style_set_text_color(&style_caption, C_MUTED);
     lv_style_set_text_font(&style_caption, &lv_font_montserrat_14);
 
-    // tappable buttons: wide rounded target, subtle border, bright feedback on press
     lv_style_set_bg_color(&style_btn, C_CARD);
     lv_style_set_bg_opa(&style_btn, LV_OPA_COVER);
     lv_style_set_radius(&style_btn, 12);
@@ -188,7 +190,6 @@ static void style_init()
     lv_style_set_text_color(&style_btn_pr, C_BG);
     lv_style_set_translate_y(&style_btn_pr, 1);
 
-    // red action button
     lv_style_init(&style_btn_red);
     lv_style_set_bg_color(&style_btn_red, lv_color_hex(0x381216));
     lv_style_set_border_color(&style_btn_red, lv_color_hex(0xef4444));
@@ -196,7 +197,6 @@ static void style_init()
     lv_style_set_radius(&style_btn_red, 10);
     lv_style_set_text_color(&style_btn_red, lv_color_hex(0xef4444));
 
-    // green action button
     lv_style_init(&style_btn_green);
     lv_style_set_bg_color(&style_btn_green, lv_color_hex(0x113322));
     lv_style_set_border_color(&style_btn_green, lv_color_hex(0x10b981));
@@ -227,10 +227,6 @@ static void set_label_font(lv_obj_t *lbl, const lv_font_t *font, lv_color_t colo
     lv_obj_set_style_text_color(lbl, color, 0);
 }
 
-// Cards are clickable by default (lv_obj base flag) and hold only display-only
-// children, so the press lands on the card itself. The card's children must
-// have LV_OBJ_FLAG_CLICKABLE cleared, otherwise a tap on an arc/bar/container
-// would hit that child (no handler) instead of bubbling to the card.
 static void card_tap_cb(lv_event_t *e);
 
 static void make_card_tappable(lv_obj_t *card, int view)
@@ -239,7 +235,6 @@ static void make_card_tappable(lv_obj_t *card, int view)
     lv_obj_add_event_cb(card, card_tap_cb, LV_EVENT_PRESSED, (void *)(intptr_t)view);
 }
 
-// ---------- header ----------
 static void fmt_uptime(char *buf, size_t sz, uint32_t sec)
 {
     uint32_t d = sec / 86400;
@@ -258,7 +253,6 @@ static void fmt_clock(char *buf, size_t sz, uint32_t epoch)
     snprintf(buf, sz, "%02u:%02u:%02u", h, m, s);
 }
 
-// ---------- per-core mini bars ----------
 static void sync_cores()
 {
     for (int i = 0; i < 32; i++) {
@@ -271,7 +265,7 @@ static void sync_cores()
     }
 }
 
-// ---------- PROC overlay ----------
+// ---------- Overlays management ----------
 static void rebuild_proc_rows();
 
 static int view_storage(int view)
@@ -297,9 +291,6 @@ static void ovl_open_view(int view)
     lv_label_set_text(lbl_ovl_title, titles[view]);
     rebuild_proc_rows();
     lv_obj_clear_flag(ovl_proc, LV_OBJ_FLAG_HIDDEN);
-#ifdef PROTO_DEBUG
-    Serial.printf("ovl open view=%d\n", view);
-#endif
 }
 
 static void ovl_toggle_cb(lv_event_t *e)
@@ -317,7 +308,6 @@ static void ovl_close_cb(lv_event_t *e)
     ovl_close();
 }
 
-// ---------- LLM overlay helpers ----------
 static void rebuild_llm_model_buttons();
 
 static void ovl_close_llm()
@@ -350,6 +340,72 @@ static void ovl_llm_close_cb(lv_event_t *e)
 {
     (void)e;
     ovl_close_llm();
+}
+
+// ---------- LAMP Modal Callbacks ----------
+static void ovl_lamp_open()
+{
+    if (ovl_lamp) lv_obj_clear_flag(ovl_lamp, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void ovl_lamp_close()
+{
+    if (ovl_lamp) lv_obj_add_flag(ovl_lamp, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void btn_lamp_power_cb(lv_event_t *e)
+{
+    (void)e;
+    g_lamp_ui_power = !g_lamp_ui_power;
+    ble_lamp_set_power(g_lamp_ui_power);
+
+    if (g_lamp_ui_power) {
+        lv_label_set_text(lbl_lamp_power, "POWER: ON");
+        lv_obj_set_style_text_color(lbl_lamp_power, C_GREEN, 0);
+        lv_obj_set_style_border_color(btn_lamp_power, C_GREEN, 0);
+        lv_obj_set_style_bg_color(btn_lamp_power, lv_color_hex(0x113322), 0);
+    } else {
+        lv_label_set_text(lbl_lamp_power, "POWER: OFF");
+        lv_obj_set_style_text_color(lbl_lamp_power, lv_color_hex(0xef4444), 0);
+        lv_obj_set_style_border_color(btn_lamp_power, lv_color_hex(0xef4444), 0);
+        lv_obj_set_style_bg_color(btn_lamp_power, lv_color_hex(0x381216), 0);
+    }
+}
+
+static void color_preset_cb(lv_event_t *e)
+{
+    uint32_t hsv = (uint32_t)(intptr_t)lv_event_get_user_data(e);
+    uint16_t h = (hsv >> 16) & 0xFFFF;
+    uint8_t s = (hsv >> 8) & 0xFF;
+    uint8_t v = hsv & 0xFF;
+    ble_lamp_set_color_hsv(h, s, v);
+}
+
+static void lamp_bright_slider_cb(lv_event_t *e)
+{
+    lv_obj_t *sl = lv_event_get_target(e);
+    int val = lv_slider_get_value(sl);
+    ble_lamp_set_brightness((uint16_t)val);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Brightness: %d%%", val / 10);
+    lv_label_set_text(lbl_lamp_bright_val, buf);
+}
+
+static void lamp_cct_slider_cb(lv_event_t *e)
+{
+    lv_obj_t *sl = lv_event_get_target(e);
+    int val = lv_slider_get_value(sl);
+    ble_lamp_set_cct((uint16_t)val);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Warmth / CCT: %d%%", val / 10);
+    lv_label_set_text(lbl_lamp_cct_val, buf);
+}
+
+static void ambient_sync_cb(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    bool state = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    ble_lamp_set_ambient_sync(state);
 }
 
 static void btn_stop_all_cb(lv_event_t *e)
@@ -458,9 +514,6 @@ static void ovl_close_profiles_modal()
 static void card_tap_cb(lv_event_t *e)
 {
     int view = (int)(intptr_t)lv_event_get_user_data(e);
-#ifdef PROTO_DEBUG
-    Serial.printf("card tap view=%d\n", view);
-#endif
     ovl_open_view(view);
 }
 
@@ -470,7 +523,7 @@ static void slider_bright_cb(lv_event_t *e)
     ledcWrite(0, (int)lv_slider_get_value(sl));
 }
 
-// ---------- periodic refresh (clock / uptime / FPS) ----------
+// ---------- periodic refresh (clock / uptime / FPS / LLM ambient pulse) ----------
 static void ui_periodic(lv_timer_t *t)
 {
     (void)t;
@@ -486,16 +539,30 @@ static void ui_periodic(lv_timer_t *t)
     }
 
     static uint32_t last_flush = 0;
-    uint32_t fps = (g_flush_cnt - last_flush) * 2;  // timer runs @500ms -> x2 for per-second
+    uint32_t fps = (g_flush_cnt - last_flush) * 2;
     last_flush = g_flush_cnt;
     char fbuf[16];
     snprintf(fbuf, sizeof(fbuf), "FPS %u", fps);
     lv_label_set_text(lbl_fps, fbuf);
+
+    // LLM Ambient Sync handler
+    if (ble_lamp_get_ambient_sync() && g_llm_status == LLM_STATUS_RUNNING) {
+        static uint32_t last_ambient_sync = 0;
+        if (ms - last_ambient_sync > 1500) {
+            last_ambient_sync = ms;
+            if (g_llm_tps > 0.0f) {
+                // Glow bright cyan during active token generation
+                ble_lamp_set_color_rgb(0, 234, 255);
+                ble_lamp_set_brightness(900);
+            } else {
+                // Calm warm amber when LLM is loaded but idle
+                ble_lamp_set_color_rgb(255, 176, 32);
+                ble_lamp_set_brightness(400);
+            }
+        }
+    }
 }
 
-// ---------- touch indev ----------
-// touch_read() returns the debounced cached state filled by touch_poll() in the
-// main loop, so the LVGL timer never blocks on I2C/GT911.
 static void indev_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
 {
     int16_t x, y;
@@ -545,15 +612,28 @@ void ui_init(int w, int h)
     lbl_clock = lv_label_create(scr);
     lv_label_set_text(lbl_clock, "--:--:--");
     set_label_font(lbl_clock, &lv_font_montserrat_16, C_TEXT);
-    lv_obj_align(lbl_clock, LV_ALIGN_TOP_RIGHT, -112, 5);
+    lv_obj_align(lbl_clock, LV_ALIGN_TOP_RIGHT, -196, 5);
 
     lbl_fps = lv_label_create(scr);
     lv_label_set_text(lbl_fps, "FPS --");
     set_label_font(lbl_fps, &lv_font_montserrat_14, C_DIM);
-    lv_obj_align(lbl_fps, LV_ALIGN_TOP_RIGHT, -112, 26);
+    lv_obj_align(lbl_fps, LV_ALIGN_TOP_RIGHT, -196, 26);
 
+    // LAMP button in header
+    btn_lamp_hdr = lv_btn_create(scr);
+    lv_obj_set_size(btn_lamp_hdr, 88, 38);
+    lv_obj_align(btn_lamp_hdr, LV_ALIGN_TOP_RIGHT, -100, 5);
+    lv_obj_add_style(btn_lamp_hdr, &style_btn, LV_PART_MAIN);
+    lv_obj_add_style(btn_lamp_hdr, &style_btn_pr, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_event_cb(btn_lamp_hdr, [](lv_event_t *e){ ovl_lamp_open(); }, LV_EVENT_PRESSED, NULL);
+    lv_obj_t *btn_lamp_lbl = lv_label_create(btn_lamp_hdr);
+    lv_label_set_text(btn_lamp_lbl, "LAMP");
+    set_label_font(btn_lamp_lbl, &lv_font_montserrat_14, C_AMBER);
+    lv_obj_center(btn_lamp_lbl);
+
+    // LLM button in header
     btn_proc = lv_btn_create(scr);
-    lv_obj_set_size(btn_proc, 96, 38);
+    lv_obj_set_size(btn_proc, 88, 38);
     lv_obj_align(btn_proc, LV_ALIGN_TOP_RIGHT, -6, 5);
     lv_obj_add_style(btn_proc, &style_btn, LV_PART_MAIN);
     lv_obj_add_style(btn_proc, &style_btn_pr, LV_PART_MAIN | LV_STATE_PRESSED);
@@ -715,7 +795,7 @@ void ui_init(int w, int h)
     lv_obj_align(lbl_disk, LV_ALIGN_TOP_MID, 0, 14);
     make_card_tappable(card_disk, VIEW_DISK);
 
-    // LLM card (tappable: stop if active, start favorite if idle)
+    // LLM card
     card_llm = make_card(scr, margin + card_w + gap, 480 - 56, card_w, 46, "LLM");
     lv_obj_set_style_radius(card_llm, 12, 0);
 
@@ -727,6 +807,144 @@ void ui_init(int w, int h)
     lv_obj_add_event_cb(card_llm, [](lv_event_t *e) {
         ovl_open_llm();
     }, LV_EVENT_PRESSED, NULL);
+
+    // ---------------- SMART LAMP MODAL (ovl_lamp) ----------------
+    ovl_lamp = lv_obj_create(scr);
+    lv_obj_set_size(ovl_lamp, w, h);
+    lv_obj_set_pos(ovl_lamp, 0, 0);
+    lv_obj_set_style_bg_color(ovl_lamp, lv_color_hex(0x080a0f), 0);
+    lv_obj_set_style_radius(ovl_lamp, 0, 0);
+    lv_obj_set_style_border_width(ovl_lamp, 0, 0);
+    lv_obj_clear_flag(ovl_lamp, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(ovl_lamp, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *lbl_lamp_title = lv_label_create(ovl_lamp);
+    lv_label_set_text(lbl_lamp_title, "SMART LAMP");
+    set_label_font(lbl_lamp_title, &lv_font_montserrat_16, C_AMBER);
+    lv_obj_align(lbl_lamp_title, LV_ALIGN_TOP_LEFT, 18, 14);
+
+    lv_obj_t *btn_lamp_close = lv_btn_create(ovl_lamp);
+    lv_obj_set_size(btn_lamp_close, 90, 36);
+    lv_obj_align(btn_lamp_close, LV_ALIGN_TOP_RIGHT, -14, 8);
+    lv_obj_add_style(btn_lamp_close, &style_btn, LV_PART_MAIN);
+    lv_obj_add_style(btn_lamp_close, &style_btn_pr, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_event_cb(btn_lamp_close, [](lv_event_t *e){ ovl_lamp_close(); }, LV_EVENT_PRESSED, NULL);
+    lv_obj_t *lbl_lclose = lv_label_create(btn_lamp_close);
+    lv_label_set_text(lbl_lclose, "CLOSE");
+    set_label_font(lbl_lclose, &lv_font_montserrat_14, C_MUTED);
+    lv_obj_center(lbl_lclose);
+
+    // Power Button
+    btn_lamp_power = lv_btn_create(ovl_lamp);
+    lv_obj_set_size(btn_lamp_power, 444, 46);
+    lv_obj_set_pos(btn_lamp_power, 18, 54);
+    lv_obj_add_style(btn_lamp_power, &style_btn_green, 0);
+    lv_obj_add_event_cb(btn_lamp_power, btn_lamp_power_cb, LV_EVENT_PRESSED, NULL);
+    lbl_lamp_power = lv_label_create(btn_lamp_power);
+    lv_label_set_text(lbl_lamp_power, "POWER: ON");
+    set_label_font(lbl_lamp_power, &lv_font_montserrat_16, C_GREEN);
+    lv_obj_center(lbl_lamp_power);
+
+    // Preset color buttons (Row of 6 colorful circles).
+    // Button background keeps the sRGB colour; the BLE command sends the vivid
+    // HSV that the phone app itself uses (sat/val 0-100, hue 0-360).
+    uint32_t colors[6] = {0x00EAFF, 0x00FF9C, 0xFFB020, 0xC084FC, 0xEF4444, 0xFFFFFF};
+    uint32_t hsvs[6] = {
+        0x00B46464, // Cyan:   hue 180, sat 100, val 100
+        0x00786464, // Green:  hue 120, sat 100, val 100
+        0x00236464, // Amber:  hue 35,  sat 100, val 100
+        0x01186464, // Purple: hue 280, sat 100, val 100
+        0x00006464, // Red:    hue 0,   sat 100, val 100
+        0x00000064, // White:  hue 0,   sat 0,   val 100
+    };
+    const char *pnames[6] = {"Cyan", "Green", "Amber", "Purple", "Red", "White"};
+    int p_w = 68;
+    for (int i = 0; i < 6; i++) {
+        lv_obj_t *pbtn = lv_btn_create(ovl_lamp);
+        lv_obj_set_size(pbtn, p_w, 40);
+        lv_obj_set_pos(pbtn, 18 + i * 75, 110);
+        lv_obj_set_style_bg_color(pbtn, lv_color_hex(colors[i]), 0);
+        lv_obj_set_style_radius(pbtn, 10, 0);
+        lv_obj_set_style_border_width(pbtn, 1, 0);
+        lv_obj_set_style_border_color(pbtn, lv_color_hex(0xffffff), 0);
+        lv_obj_add_event_cb(pbtn, color_preset_cb, LV_EVENT_PRESSED, (void *)(intptr_t)hsvs[i]);
+
+        lv_obj_t *plbl = lv_label_create(pbtn);
+        lv_label_set_text(plbl, pnames[i]);
+        set_label_font(plbl, &lv_font_montserrat_12, (colors[i] == 0xFFFFFF || colors[i] == 0x00EAFF || colors[i] == 0x00FF9C || colors[i] == 0xFFB020) ? C_BG : C_TEXT);
+        lv_obj_center(plbl);
+    }
+
+    // Brightness Section (Y: 165)
+    lbl_lamp_bright_val = lv_label_create(ovl_lamp);
+    lv_label_set_text(lbl_lamp_bright_val, "Brightness: 80%");
+    set_label_font(lbl_lamp_bright_val, &lv_font_montserrat_14, C_TEXT);
+    lv_obj_align(lbl_lamp_bright_val, LV_ALIGN_TOP_LEFT, 18, 165);
+
+    slider_lamp_bright = lv_slider_create(ovl_lamp);
+    lv_obj_set_size(slider_lamp_bright, 444, 18);
+    lv_obj_align(slider_lamp_bright, LV_ALIGN_TOP_LEFT, 18, 190);
+    lv_slider_set_range(slider_lamp_bright, 10, 1000);
+    lv_slider_set_value(slider_lamp_bright, 800, LV_ANIM_OFF);
+    lv_obj_add_event_cb(slider_lamp_bright, lamp_bright_slider_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_set_style_bg_color(slider_lamp_bright, C_ARC_BG, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(slider_lamp_bright, C_AMBER, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(slider_lamp_bright, C_TEXT, LV_PART_KNOB);
+
+    // Warmth / CCT Section (Y: 225)
+    lbl_lamp_cct_val = lv_label_create(ovl_lamp);
+    lv_label_set_text(lbl_lamp_cct_val, "Warmth / CCT: 50%");
+    set_label_font(lbl_lamp_cct_val, &lv_font_montserrat_14, C_TEXT);
+    lv_obj_align(lbl_lamp_cct_val, LV_ALIGN_TOP_LEFT, 18, 225);
+
+    slider_lamp_cct = lv_slider_create(ovl_lamp);
+    lv_obj_set_size(slider_lamp_cct, 444, 18);
+    lv_obj_align(slider_lamp_cct, LV_ALIGN_TOP_LEFT, 18, 250);
+    lv_slider_set_range(slider_lamp_cct, 0, 1000);
+    lv_slider_set_value(slider_lamp_cct, 500, LV_ANIM_OFF);
+    lv_obj_add_event_cb(slider_lamp_cct, lamp_cct_slider_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_set_style_bg_color(slider_lamp_cct, C_ARC_BG, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(slider_lamp_cct, C_CYAN, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(slider_lamp_cct, C_TEXT, LV_PART_KNOB);
+
+    // LLM Ambient Sync Card (Y: 290)
+    lv_obj_t *ambient_card = lv_obj_create(ovl_lamp);
+    lv_obj_set_pos(ambient_card, 18, 290);
+    lv_obj_set_size(ambient_card, 444, 76);
+    lv_obj_add_style(ambient_card, &style_card, 0);
+    lv_obj_set_style_border_width(ambient_card, 1, 0);
+    lv_obj_set_style_border_color(ambient_card, C_CYAN, 0);
+    lv_obj_clear_flag(ambient_card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *lbl_amb_t = lv_label_create(ambient_card);
+    lv_label_set_text(lbl_amb_t, "LLM AMBIENT GLOW SYNC");
+    set_label_font(lbl_amb_t, &lv_font_montserrat_16, C_CYAN);
+    lv_obj_align(lbl_amb_t, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    lv_obj_t *lbl_amb_d = lv_label_create(ambient_card);
+    lv_label_set_text(lbl_amb_d, "Lamp pulses cyan during token generation");
+    set_label_font(lbl_amb_d, &lv_font_montserrat_12, C_MUTED);
+    lv_obj_align(lbl_amb_d, LV_ALIGN_BOTTOM_LEFT, 0, -2);
+
+    sw_ambient_sync = lv_switch_create(ambient_card);
+    lv_obj_align(sw_ambient_sync, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_add_event_cb(sw_ambient_sync, ambient_sync_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // Display backlight slider at bottom of lamp modal (Y: 420)
+    lv_obj_t *ovl_lamp_brlbl = lv_label_create(ovl_lamp);
+    lv_label_set_text(ovl_lamp_brlbl, "PANEL BRIGHT");
+    set_label_font(ovl_lamp_brlbl, &lv_font_montserrat_14, C_MUTED);
+    lv_obj_align(ovl_lamp_brlbl, LV_ALIGN_BOTTOM_LEFT, 18, -14);
+
+    lv_obj_t *ovl_lamp_slider = lv_slider_create(ovl_lamp);
+    lv_obj_set_size(ovl_lamp_slider, w - 180, 14);
+    lv_obj_align(ovl_lamp_slider, LV_ALIGN_BOTTOM_LEFT, 150, -14);
+    lv_slider_set_range(ovl_lamp_slider, 0, 255);
+    lv_slider_set_value(ovl_lamp_slider, 150, LV_ANIM_OFF);
+    lv_obj_add_event_cb(ovl_lamp_slider, slider_bright_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_set_style_bg_color(ovl_lamp_slider, C_ARC_BG, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(ovl_lamp_slider, C_CYAN, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(ovl_lamp_slider, C_TEXT, LV_PART_KNOB);
 
     // ---------------- LLM overlay (Paginated 6-card grid) ----------------
     ovl_llm = lv_obj_create(scr);
@@ -764,13 +982,11 @@ void ui_init(int w, int h)
     set_label_font(lbl_close, &lv_font_montserrat_14, C_MUTED);
     lv_obj_center(lbl_close);
 
-    // Status line
     lbl_llm_ovl_status = lv_label_create(ovl_llm);
     lv_label_set_text(lbl_llm_ovl_status, "Status: IDLE");
     set_label_font(lbl_llm_ovl_status, &lv_font_montserrat_14, C_MUTED);
     lv_obj_align(lbl_llm_ovl_status, LV_ALIGN_TOP_LEFT, 18, 52);
 
-    // 6 Static Model Card Buttons (2 cols x 3 rows, Y: 78, 170, 262)
     int card_xs[2] = {18, 246};
     int card_ys[3] = {78, 170, 262};
     for (int i = 0; i < 6; i++) {
@@ -803,7 +1019,6 @@ void ui_init(int w, int h)
         lv_obj_add_flag(btn_llm_cards[i], LV_OBJ_FLAG_HIDDEN);
     }
 
-    // Pagination controls (Y: 360)
     btn_page_prev = lv_btn_create(ovl_llm);
     lv_obj_set_size(btn_page_prev, 110, 38);
     lv_obj_set_pos(btn_page_prev, 18, 360);
@@ -831,7 +1046,6 @@ void ui_init(int w, int h)
     set_label_font(lbl_next, &lv_font_montserrat_14, C_MUTED);
     lv_obj_center(lbl_next);
 
-    // Brightness slider at bottom of LLM overlay (Y: 420)
     lv_obj_t *ovl_llm_brlbl = lv_label_create(ovl_llm);
     lv_label_set_text(ovl_llm_brlbl, "BRIGHTNESS");
     set_label_font(ovl_llm_brlbl, &lv_font_montserrat_14, C_MUTED);
@@ -965,8 +1179,8 @@ void ui_init(int w, int h)
     lv_obj_center(close_lbl);
 
     // ---------------- touch indev ----------------
-    touch_init();  // (re)initializes the touch chip so this TU's static instance is ready
-    static lv_indev_drv_t indev_drv;  // must outlive ui_init: lv_indev_drv_register keeps a pointer
+    touch_init();
+    static lv_indev_drv_t indev_drv;
     lv_indev_drv_init(&indev_drv);
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.read_cb = indev_read_cb;
@@ -1110,11 +1324,6 @@ void ui_set_header(uint32_t uptime_sec, uint32_t epoch_sec, const char *hostname
     strncpy(g_hostname_local, hostname, sizeof(g_hostname_local) - 1);
     g_hostname_local[sizeof(g_hostname_local) - 1] = '\0';
     lv_label_set_text(lbl_hostname, g_hostname_local);
-
-    // uptime/clock are rendered only by ui_periodic from the local monotonic
-    // counter. Writing the raw host snapshot here too would fight with it:
-    // the two values differ by the serial transport delay and the labels
-    // would flicker a second back and forth each frame.
 }
 
 static uint32_t rd_u32(const uint8_t *p)
@@ -1144,7 +1353,7 @@ void ui_set_proc(const uint8_t *data, uint16_t len)
     if (ovl_proc && !lv_obj_has_flag(ovl_proc, LV_OBJ_FLAG_HIDDEN)) {
         bool relevant = (kind == view_storage(g_active_kind)) ||
                         (g_active_kind == VIEW_DISK &&
-                         (kind == PROC_KIND_DISK_RD || kind == PROC_KIND_DISK_WR));
+                          (kind == PROC_KIND_DISK_RD || kind == PROC_KIND_DISK_WR));
         if (relevant)
             rebuild_proc_rows();
     }
@@ -1290,7 +1499,6 @@ void ui_set_llm_profiles(const uint8_t *data, uint16_t len)
     uint8_t count = data[14];
     if (count > 6) count = 6;
 
-    // Check if this packet matches the currently requested model
     if (strncmp(model_id, g_current_profile_model_id, 14) != 0) {
         return;
     }
@@ -1309,7 +1517,6 @@ void ui_set_llm_profiles(const uint8_t *data, uint16_t len)
         p += 34;
     }
 
-    // Refresh profiles overlay if visible
     if (ovl_llm_profiles && !lv_obj_has_flag(ovl_llm_profiles, LV_OBJ_FLAG_HIDDEN)) {
         if (g_selected_model_idx >= 0 && g_selected_model_idx < g_llm_models_count &&
             (g_llm_models[g_selected_model_idx].status == LLM_STATUS_RUNNING ||
@@ -1330,5 +1537,3 @@ void ui_set_llm_profiles(const uint8_t *data, uint16_t len)
         }
     }
 }
-
-

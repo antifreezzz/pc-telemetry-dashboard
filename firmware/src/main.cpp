@@ -3,6 +3,7 @@
 #include "touch.h"
 #include "ui.h"
 #include "protocol.h"
+#include "ble_lamp.h"
 
 void setup()
 {
@@ -30,6 +31,9 @@ void setup()
 
     protocol_init();
     Serial.println("Protocol init done");
+
+    ble_lamp_init();
+    Serial.println("BLE Lamp init done");
 }
 
 void loop()

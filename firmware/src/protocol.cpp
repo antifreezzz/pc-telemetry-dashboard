@@ -1,5 +1,6 @@
 #include "protocol.h"
 #include "ui.h"
+#include "ble_lamp.h"
 
 volatile uint32_t g_epoch_sec = 0;
 volatile uint32_t g_uptime_sec = 0;
@@ -143,6 +144,7 @@ void protocol_poll()
         {
         case ST_SYNC:
             if (b == PROTO_SYNC) st = ST_LEN_LO;
+            else if (b == 0x5A) ble_lamp_run_hue_sweep();
             break;
         case ST_LEN_LO:
             pkt_len = b;
