@@ -89,6 +89,11 @@ static lv_obj_t *card_cpu;
 static lv_obj_t *card_gpu;
 static lv_obj_t *card_ram;
 static lv_obj_t *card_disk;
+static lv_obj_t *card_llm;
+static lv_obj_t *lbl_llm;
+static uint8_t g_llm_status = 255;
+static float g_llm_tps = 0.0f;
+static char g_llm_model[25] = {0};
 
 static lv_style_t style_card;
 static lv_style_t style_arc_bg;
@@ -501,26 +506,43 @@ void ui_init(int w, int h)
     set_label_font(lbl_tx, &lv_font_montserrat_12, C_GREEN);
     lv_obj_align(lbl_tx, LV_ALIGN_TOP_RIGHT, -6, 24);
 
-    // ---------------- disk strip ----------------
-    card_disk = make_card(scr, margin, 480 - 56, w - 2 * margin, 46, "DISK");
+    // ---------------- bottom strip: DISK & LLM ----------------
+    card_disk = make_card(scr, margin, 480 - 56, card_w, 46, "DISK");
     lv_obj_t *disk = card_disk;
     lv_obj_set_style_radius(disk, 12, 0);
 
     bar_disk = lv_bar_create(disk);
-    lv_obj_set_size(bar_disk, 250, 12);
-    lv_obj_align(bar_disk, LV_ALIGN_LEFT_MID, 64, 0);
+    lv_obj_set_size(bar_disk, card_w - 30, 8);
+    lv_obj_align(bar_disk, LV_ALIGN_BOTTOM_MID, 0, -6);
     lv_bar_set_range(bar_disk, 0, 100);
     lv_bar_set_value(bar_disk, 0, LV_ANIM_OFF);
     lv_obj_clear_flag(bar_disk, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(bar_disk, C_ARC_BG, LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar_disk, C_AMBER, LV_PART_INDICATOR);
-    lv_obj_set_style_radius(bar_disk, 6, 0);
+    lv_obj_set_style_radius(bar_disk, 4, 0);
 
     lbl_disk = lv_label_create(disk);
-    lv_label_set_text(lbl_disk, "rd 0.0 / wr 0.0 MB/s");
-    set_label_font(lbl_disk, &lv_font_montserrat_14, C_TEXT);
-    lv_obj_align(lbl_disk, LV_ALIGN_RIGHT_MID, -10, 0);
+    lv_label_set_text(lbl_disk, "0.0 / 0.0 MB/s");
+    set_label_font(lbl_disk, &lv_font_montserrat_12, C_TEXT);
+    lv_obj_align(lbl_disk, LV_ALIGN_TOP_MID, 0, 14);
     make_card_tappable(card_disk, VIEW_DISK);
+
+    // LLM card (tappable: stop if active, start favorite if idle)
+    card_llm = make_card(scr, margin + card_w + gap, 480 - 56, card_w, 46, "LLM");
+    lv_obj_set_style_radius(card_llm, 12, 0);
+
+    lbl_llm = lv_label_create(card_llm);
+    lv_label_set_text(lbl_llm, "IDLE (Tap: Fav)");
+    set_label_font(lbl_llm, &lv_font_montserrat_12, C_MUTED);
+    lv_obj_align(lbl_llm, LV_ALIGN_CENTER, 0, 4);
+
+    lv_obj_add_event_cb(card_llm, [](lv_event_t *e) {
+        if (g_llm_status == LLM_STATUS_RUNNING || g_llm_status == LLM_STATUS_STARTING) {
+            protocol_send_cmd(CMD_STOP_ALL);
+        } else {
+            protocol_send_cmd(CMD_START_FAVORITE);
+        }
+    }, LV_EVENT_PRESSED, NULL);
 
     // ---------------- PROC overlay ----------------
     ovl_proc = lv_obj_create(scr);
@@ -755,3 +777,38 @@ void ui_set_proc(const uint8_t *data, uint16_t len)
             rebuild_proc_rows();
     }
 }
+
+void ui_set_llm(uint8_t status, float tps, const char *model)
+{
+    g_llm_status = status;
+    g_llm_tps = tps;
+    if (model) {
+        strncpy(g_llm_model, model, sizeof(g_llm_model) - 1);
+        g_llm_model[sizeof(g_llm_model) - 1] = '\0';
+    } else {
+        g_llm_model[0] = '\0';
+    }
+
+    if (!lbl_llm) return;
+
+    char buf[40];
+    if (status == LLM_STATUS_RUNNING) {
+        if (tps > 0.0f) {
+            snprintf(buf, sizeof(buf), "%s (%.1f t/s)", g_llm_model, tps);
+        } else {
+            snprintf(buf, sizeof(buf), "%s [ON]", g_llm_model);
+        }
+        set_label_font(lbl_llm, &lv_font_montserrat_12, C_GREEN);
+    } else if (status == LLM_STATUS_STARTING) {
+        snprintf(buf, sizeof(buf), "%s...", g_llm_model);
+        set_label_font(lbl_llm, &lv_font_montserrat_12, C_AMBER);
+    } else if (status == LLM_STATUS_IDLE) {
+        snprintf(buf, sizeof(buf), "IDLE (Tap: Fav)");
+        set_label_font(lbl_llm, &lv_font_montserrat_12, C_MUTED);
+    } else {
+        snprintf(buf, sizeof(buf), "Offline");
+        set_label_font(lbl_llm, &lv_font_montserrat_12, C_DIM);
+    }
+    lv_label_set_text(lbl_llm, buf);
+}
+

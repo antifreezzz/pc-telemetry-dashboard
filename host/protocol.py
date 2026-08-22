@@ -28,6 +28,7 @@ FIELD_NET = 0x04
 FIELD_DISK = 0x05
 FIELD_HEADER = 0x06
 FIELD_PROC = 0x07
+FIELD_LLM = 0x08
 
 PROC_KIND_CPU = 0
 PROC_KIND_RAM = 1
@@ -35,10 +36,19 @@ PROC_KIND_GPU = 2
 PROC_KIND_DISK_RD = 3
 PROC_KIND_DISK_WR = 4
 
+LLM_STATUS_IDLE = 0
+LLM_STATUS_RUNNING = 1
+LLM_STATUS_STARTING = 2
+LLM_STATUS_OFFLINE = 255
+
+CMD_STOP_ALL = 0x01
+CMD_START_FAVORITE = 0x02
+
 N_NA = 255
 
 _HOSTNAME_LEN = 24
 _PROC_NAME_LEN = 16
+_MODEL_NAME_LEN = 24
 
 
 def crc8(data: bytes) -> int:
@@ -130,6 +140,16 @@ def build_header(uptime_s: int, epoch_s: int, hostname: str) -> bytes:
     return struct.pack("<II", _u32(uptime_s), _u32(epoch_s)) + _block(hostname, _HOSTNAME_LEN)
 
 
+def build_llm(status: int, tps: float, model: str) -> bytes:
+    """Pack LLM telemetry: [status:u8][tps_x10:u16][model_name:24s]."""
+    if status < 0 or status == LLM_STATUS_OFFLINE:
+        st = LLM_STATUS_OFFLINE
+    else:
+        st = min(255, max(0, int(status)))
+    tps_x10 = _u16(int(round(max(0.0, float(tps)) * 10)))
+    return struct.pack("<BH", st, tps_x10) + _block(model, _MODEL_NAME_LEN)
+
+
 def build_proc(kind: int, entries: list) -> bytes:
     """entries: list of (value:int, pid:int, name:str).
 
@@ -158,3 +178,64 @@ def pack_frame(fields: list) -> bytes:
     body = bytes([FRAME_TYPE]) + bytes(payload)
     header = bytes([SYNC, len(payload) & 0xFF, (len(payload) >> 8) & 0xFF, FRAME_TYPE])
     return header + payload + bytes([crc8(body)])
+
+
+FRAME_TYPE_CMD = 0xF2
+
+
+def build_cmd_frame(cmd_id: int, arg: str = "") -> bytes:
+    """Build a binary command frame: [0xAA][len_lo][len_hi][0xF2][cmd_id][arg][crc8]."""
+    arg_bytes = arg.encode("utf-8")
+    payload = bytes([cmd_id]) + arg_bytes
+    body = bytes([FRAME_TYPE_CMD]) + payload
+    header = bytes([SYNC, len(payload) & 0xFF, (len(payload) >> 8) & 0xFF, FRAME_TYPE_CMD])
+    return header + payload + bytes([crc8(body)])
+
+
+def parse_serial_command(line_or_data: str | bytes) -> tuple | None:
+    """Parse text command or binary command frame.
+
+    Returns (cmd_code_or_str, optional_arg) or None.
+    """
+    if isinstance(line_or_data, bytes):
+        # Check for binary command frame: [0xAA][len_lo][len_hi][0xF2][payload...][crc8]
+        if (
+            len(line_or_data) >= 5
+            and line_or_data[0] == SYNC
+            and line_or_data[3] == FRAME_TYPE_CMD
+        ):
+            payload_len = line_or_data[1] | (line_or_data[2] << 8)
+            if len(line_or_data) >= 4 + payload_len + 1:
+                expected_crc = line_or_data[4 + payload_len]
+                actual_crc = crc8(line_or_data[3 : 4 + payload_len])
+                if expected_crc == actual_crc and payload_len >= 1:
+                    cmd_id = line_or_data[4]
+                    arg = ""
+                    if payload_len > 1:
+                        arg = line_or_data[5 : 4 + payload_len].decode("utf-8", errors="replace")
+                    return cmd_id, (arg if arg else None)
+        try:
+            line_str = line_or_data.decode("utf-8", errors="replace").strip()
+        except Exception:
+            return None
+    else:
+        line_str = line_or_data.strip()
+
+    if not line_str:
+        return None
+
+    # Handle text commands
+    raw = line_str
+    if raw.upper().startswith("CMD:"):
+        raw = raw[4:].strip()
+
+    cmd_upper = raw.upper()
+    if cmd_upper in ("STOP_ALL", "LLM_STOP_ALL", "STOP"):
+        return CMD_STOP_ALL, None
+    elif cmd_upper in ("START_FAVORITE", "LLM_START_FAVORITE", "START_FAV"):
+        return CMD_START_FAVORITE, None
+    elif cmd_upper.startswith("START_MODEL:") or cmd_upper.startswith("START:"):
+        _, arg = raw.split(":", 1)
+        return "START_MODEL", arg.strip()
+
+    return None

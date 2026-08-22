@@ -72,6 +72,7 @@ class TestGpuFdinfo(unittest.TestCase):
 from host.protocol import (
     SYNC,
     FRAME_TYPE,
+    FRAME_TYPE_CMD,
     FIELD_CPU,
     FIELD_RAM,
     FIELD_GPU,
@@ -79,11 +80,18 @@ from host.protocol import (
     FIELD_DISK,
     FIELD_HEADER,
     FIELD_PROC,
+    FIELD_LLM,
     PROC_KIND_CPU,
     PROC_KIND_RAM,
     PROC_KIND_GPU,
     PROC_KIND_DISK_RD,
     PROC_KIND_DISK_WR,
+    LLM_STATUS_IDLE,
+    LLM_STATUS_RUNNING,
+    LLM_STATUS_STARTING,
+    LLM_STATUS_OFFLINE,
+    CMD_STOP_ALL,
+    CMD_START_FAVORITE,
     crc8,
     pack_frame,
     pack_kiBs,
@@ -95,7 +103,11 @@ from host.protocol import (
     build_disk,
     build_header,
     build_proc,
+    build_llm,
+    build_cmd_frame,
+    parse_serial_command,
 )
+from host.llm_client import LLMControlClient, LLMMonitor, _status_str_to_code
 
 PROC_ENTRY_BYTES = 22
 
@@ -500,6 +512,251 @@ class TestGpuMonitorPriming(unittest.TestCase):
                 mon.stop()
         self.assertEqual(pct, -1)
         self.assertEqual(total, 0)
+
+
+class TestLlmProtocol(unittest.TestCase):
+    def test_build_llm_running(self):
+        data = build_llm(LLM_STATUS_RUNNING, 40.3, "gemma4")
+        self.assertEqual(len(data), 1 + 2 + 24)
+        status, tps_x10 = struct.unpack_from("<BH", data, 0)
+        self.assertEqual(status, LLM_STATUS_RUNNING)
+        self.assertEqual(tps_x10, 403)
+        self.assertEqual(data[3:].rstrip(b"\x00"), b"gemma4")
+
+    def test_build_llm_idle(self):
+        data = build_llm(LLM_STATUS_IDLE, 0.0, "")
+        self.assertEqual(len(data), 27)
+        status, tps_x10 = struct.unpack_from("<BH", data, 0)
+        self.assertEqual(status, LLM_STATUS_IDLE)
+        self.assertEqual(tps_x10, 0)
+        self.assertEqual(data[3:], b"\x00" * 24)
+
+    def test_build_llm_offline(self):
+        data = build_llm(LLM_STATUS_OFFLINE, 0.0, "")
+        self.assertEqual(len(data), 27)
+        status, tps_x10 = struct.unpack_from("<BH", data, 0)
+        self.assertEqual(status, 255)
+        self.assertEqual(tps_x10, 0)
+
+    def test_build_llm_negative_clamps(self):
+        data = build_llm(-1, -5.0, "test")
+        status, tps_x10 = struct.unpack_from("<BH", data, 0)
+        self.assertEqual(status, 255)
+        self.assertEqual(tps_x10, 0)
+
+    def test_build_llm_long_model_name_truncated(self):
+        long_name = "a" * 100
+        data = build_llm(LLM_STATUS_RUNNING, 10.0, long_name)
+        self.assertEqual(len(data), 27)
+        name = data[3:].rstrip(b"\x00")
+        self.assertLessEqual(len(name), 23)
+
+    def test_frame_round_trip_with_llm(self):
+        fields = [
+            (FIELD_CPU, build_cpu(30, [10, 20])),
+            (FIELD_LLM, build_llm(LLM_STATUS_RUNNING, 25.5, "qwen2.5-coder")),
+        ]
+        frame = pack_frame(fields)
+        decoded = decode_frame(frame)
+        self.assertEqual(len(decoded), 2)
+        llm_blobs = field_data(decoded, FIELD_LLM)
+        self.assertEqual(len(llm_blobs), 1)
+        blob = llm_blobs[0]
+        self.assertEqual(len(blob), 27)
+        st, tps_x10 = struct.unpack_from("<BH", blob, 0)
+        self.assertEqual(st, LLM_STATUS_RUNNING)
+        self.assertEqual(tps_x10, 255)
+        self.assertEqual(blob[3:].rstrip(b"\x00"), b"qwen2.5-coder")
+
+
+class TestSerialCommands(unittest.TestCase):
+    def test_parse_text_stop_all(self):
+        for s in ("CMD:STOP_ALL", "CMD:stop_all", "STOP_ALL", "CMD:LLM_STOP_ALL", "CMD:STOP"):
+            res = parse_serial_command(s)
+            self.assertEqual(res, (CMD_STOP_ALL, None))
+
+    def test_parse_text_start_favorite(self):
+        for s in ("CMD:START_FAVORITE", "START_FAVORITE", "CMD:LLM_START_FAVORITE", "CMD:START_FAV"):
+            res = parse_serial_command(s)
+            self.assertEqual(res, (CMD_START_FAVORITE, None))
+
+    def test_parse_text_start_model(self):
+        res = parse_serial_command("CMD:START_MODEL:gemma4")
+        self.assertEqual(res, ("START_MODEL", "gemma4"))
+        res = parse_serial_command("START:llama3")
+        self.assertEqual(res, ("START_MODEL", "llama3"))
+
+    def test_parse_binary_cmd_frame(self):
+        frame = build_cmd_frame(CMD_STOP_ALL)
+        res = parse_serial_command(frame)
+        self.assertEqual(res, (CMD_STOP_ALL, None))
+
+        frame_fav = build_cmd_frame(CMD_START_FAVORITE)
+        res_fav = parse_serial_command(frame_fav)
+        self.assertEqual(res_fav, (CMD_START_FAVORITE, None))
+
+        frame_arg = build_cmd_frame(0x05, "custom_model")
+        res_arg = parse_serial_command(frame_arg)
+        self.assertEqual(res_arg, (0x05, "custom_model"))
+
+    def test_parse_invalid_or_empty(self):
+        self.assertIsNone(parse_serial_command(""))
+        self.assertIsNone(parse_serial_command("   "))
+        self.assertIsNone(parse_serial_command("SOME_RANDOM_LOG_LINE"))
+        self.assertIsNone(parse_serial_command(b""))
+        self.assertIsNone(parse_serial_command(b"\xaa\x01\x00\xf2\x01\x00"))  # bad crc
+
+
+class TestLlmClient(unittest.TestCase):
+    def test_status_str_to_code(self):
+        self.assertEqual(_status_str_to_code("running"), LLM_STATUS_RUNNING)
+        self.assertEqual(_status_str_to_code("RUNNING"), LLM_STATUS_RUNNING)
+        self.assertEqual(_status_str_to_code("starting"), LLM_STATUS_STARTING)
+        self.assertEqual(_status_str_to_code("loading"), LLM_STATUS_STARTING)
+        self.assertEqual(_status_str_to_code("idle"), LLM_STATUS_IDLE)
+        self.assertEqual(_status_str_to_code("stopped"), LLM_STATUS_IDLE)
+        self.assertEqual(_status_str_to_code("unknown", has_active_model=True), LLM_STATUS_RUNNING)
+        self.assertEqual(_status_str_to_code("unknown", has_active_model=False), LLM_STATUS_IDLE)
+        self.assertEqual(_status_str_to_code(""), LLM_STATUS_IDLE)
+
+    def test_get_status_success(self):
+        sample = {
+            "status": "running",
+            "active_model": "gemma4",
+            "tps": 40.3,
+            "port": 8088,
+            "system": {},
+        }
+        client = LLMControlClient()
+        with mock.patch.object(client, "_request", return_value=sample):
+            res = client.get_status()
+        self.assertEqual(res, sample)
+
+    def test_get_status_error_returns_none(self):
+        client = LLMControlClient()
+        with mock.patch.object(client, "_request", return_value=None):
+            res = client.get_status()
+        self.assertIsNone(res)
+
+    def test_get_models_success(self):
+        models = [
+            {"id": "m1", "name": "Model 1", "is_favorite": False},
+            {"id": "m2", "name": "Model 2", "is_favorite": True, "default_profile": "fast"},
+        ]
+        client = LLMControlClient()
+        with mock.patch.object(client, "_request", return_value=models):
+            res = client.get_models()
+        self.assertEqual(len(res), 2)
+
+    def test_stop_all(self):
+        client = LLMControlClient()
+        with mock.patch.object(client, "_request", return_value={"status": "stopped_all"}):
+            self.assertTrue(client.stop_all())
+        with mock.patch.object(client, "_request", return_value=None):
+            self.assertFalse(client.stop_all())
+
+    def test_start_model(self):
+        client = LLMControlClient()
+        with mock.patch.object(client, "_request", return_value={"status": "starting"}) as m_req:
+            ok = client.start_model("gemma4", profile="default")
+            self.assertTrue(ok)
+            m_req.assert_called_once_with(
+                "POST",
+                "/api/models/gemma4/start",
+                data={"profile": "default"},
+            )
+
+    def test_start_favorite(self):
+        models = [
+            {"id": "m1", "name": "Model 1", "is_favorite": False},
+            {"id": "m2", "name": "Model 2", "is_favorite": True, "default_profile": "turbo"},
+        ]
+        client = LLMControlClient()
+        with mock.patch.object(client, "get_models", return_value=models), \
+             mock.patch.object(client, "start_model", return_value=True) as m_start:
+            ok = client.start_favorite()
+            self.assertTrue(ok)
+            m_start.assert_called_once_with("m2", profile="turbo")
+
+    def test_start_favorite_fallback_first(self):
+        models = [
+            {"id": "m1", "name": "Model 1", "is_favorite": False},
+        ]
+        client = LLMControlClient()
+        with mock.patch.object(client, "get_models", return_value=models), \
+             mock.patch.object(client, "start_model", return_value=True) as m_start:
+            ok = client.start_favorite()
+            self.assertTrue(ok)
+            m_start.assert_called_once_with("m1", profile="default")
+
+    def test_start_favorite_no_models(self):
+        client = LLMControlClient()
+        with mock.patch.object(client, "get_models", return_value=[]):
+            self.assertFalse(client.start_favorite())
+
+
+class TestLlmMonitor(unittest.TestCase):
+    def test_monitor_polling_and_snapshot(self):
+        client = LLMControlClient()
+        sample = {
+            "status": "running",
+            "active_model": "gemma4",
+            "tps": 40.3,
+        }
+        with mock.patch.object(client, "get_status", return_value=sample):
+            mon = LLMMonitor(client=client, poll_interval=0.05)
+            try:
+                # wait briefly for worker thread to poll
+                for _ in range(20):
+                    st, tps, model = mon.snapshot()
+                    if st == LLM_STATUS_RUNNING:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(st, LLM_STATUS_RUNNING)
+                self.assertAlmostEqual(tps, 40.3)
+                self.assertEqual(model, "gemma4")
+            finally:
+                mon.stop()
+
+    def test_monitor_graceful_offline(self):
+        client = LLMControlClient()
+        with mock.patch.object(client, "get_status", return_value=None):
+            mon = LLMMonitor(client=client, poll_interval=0.05)
+            try:
+                st, tps, model = mon.snapshot()
+                self.assertEqual(st, LLM_STATUS_OFFLINE)
+                self.assertEqual(tps, 0.0)
+                self.assertEqual(model, "")
+            finally:
+                mon.stop()
+
+    def test_monitor_stop_all_clears_cache(self):
+        client = LLMControlClient()
+        mon = LLMMonitor(client=client, poll_interval=10.0)
+        try:
+            with mon._lock:
+                mon._status = LLM_STATUS_RUNNING
+                mon._tps = 30.0
+                mon._active_model = "test"
+            with mock.patch.object(client, "stop_all", return_value=True):
+                self.assertTrue(mon.stop_all())
+            st, tps, model = mon.snapshot()
+            self.assertEqual(st, LLM_STATUS_IDLE)
+            self.assertEqual(tps, 0.0)
+            self.assertEqual(model, "")
+        finally:
+            mon.stop()
+
+
+class TestLlmSnapshot(unittest.TestCase):
+    def test_none_monitor(self):
+        self.assertEqual(metrics.llm_snapshot(None), (255, 0.0, ""))
+
+    def test_valid_monitor(self):
+        class _FakeMon:
+            def snapshot(self):
+                return (LLM_STATUS_RUNNING, 42.0, "m")
+        self.assertEqual(metrics.llm_snapshot(_FakeMon()), (LLM_STATUS_RUNNING, 42.0, "m"))
 
 
 if __name__ == "__main__":

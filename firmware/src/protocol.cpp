@@ -87,6 +87,18 @@ static bool handle_payload(const uint8_t *p, uint16_t len)
         case FIELD_PROC:
             ui_set_proc(&p[pos], flen);
             break;
+        case FIELD_LLM:
+            if (flen >= 3) {
+                uint8_t status = p[pos];
+                uint16_t tps_x10 = (uint16_t)p[pos + 1] | ((uint16_t)p[pos + 2] << 8);
+                char model_buf[25] = {0};
+                uint8_t str_len = (flen > 3) ? (flen - 3) : 0;
+                if (str_len > 24) str_len = 24;
+                memcpy(model_buf, &p[pos + 3], str_len);
+                model_buf[str_len] = '\0';
+                ui_set_llm(status, tps_x10 / 10.0f, model_buf);
+            }
+            break;
         default:
             break;  // unknown field id: skip via field_len
         }
@@ -166,5 +178,14 @@ void protocol_poll()
             st = ST_SYNC;
             break;
         }
+    }
+}
+
+void protocol_send_cmd(uint8_t cmd_id)
+{
+    if (cmd_id == CMD_STOP_ALL) {
+        Serial.println("CMD:STOP_ALL");
+    } else if (cmd_id == CMD_START_FAVORITE) {
+        Serial.println("CMD:START_FAVORITE");
     }
 }

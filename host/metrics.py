@@ -45,6 +45,16 @@ def gpu_snapshot(monitor) -> tuple:
         return -1, 0, 0, 0
 
 
+def llm_snapshot(monitor) -> tuple:
+    """Return (status, tps, model_name) from the background LLMMonitor object."""
+    if monitor is None:
+        return 255, 0.0, ""
+    try:
+        return monitor.snapshot()
+    except Exception:
+        return 255, 0.0, ""
+
+
 def net_snapshot(prev, now, interval: float) -> tuple:
     """KiB/s rates from two psutil.net_io_counters snapshots."""
     return (

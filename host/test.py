@@ -22,9 +22,9 @@ from host import metrics
 from host.gpu_monitor import IntelGpuMonitor
 from host.protocol import (
     pack_frame, build_cpu, build_ram, build_gpu, build_net, build_disk,
-    build_header, build_proc,
+    build_header, build_proc, build_llm,
     FIELD_CPU, FIELD_RAM, FIELD_GPU, FIELD_NET, FIELD_DISK, FIELD_HEADER,
-    FIELD_PROC,
+    FIELD_PROC, FIELD_LLM,
     PROC_KIND_CPU, PROC_KIND_RAM, PROC_KIND_GPU,
     PROC_KIND_DISK_RD, PROC_KIND_DISK_WR,
 )
@@ -51,6 +51,7 @@ def send_one_frame(ser, snaps):
         (FIELD_PROC, build_proc(PROC_KIND_DISK_WR,
                                 [(wr, pid, name)
                                  for _rd, wr, pid, name in snaps["proc_disk"]])),
+        (FIELD_LLM, build_llm(*snaps.get("llm", (0, 0.0, "")))),
     ]
     ser.write(pack_frame(fields))
 
