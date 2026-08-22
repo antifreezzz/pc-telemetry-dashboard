@@ -359,7 +359,7 @@ static void btn_stop_all_cb(lv_event_t *e)
 }
 
 static const char *k_profiles_names[6] = {"default", "fast", "long", "xlong", "max", "vision"};
-static const char *k_profiles_titles[6] = {"⚡ default", "🚀 fast (Q4)", "📚 long", "🌌 xlong", "⚡ max", "👁 vision"};
+static const char *k_profiles_titles[6] = {"default", "fast (Q4)", "long", "xlong", "max", "vision"};
 static const char *k_profiles_descs[6] = {"ctx 4K standard", "ctx 2K (fast)", "ctx 16K (long)", "ctx 32K (ultra)", "ctx 128K (max)", "vision (--mmproj)"};
 
 static void ovl_open_profiles_modal(int model_idx);
@@ -780,7 +780,7 @@ void ui_init(int w, int h)
         lv_obj_align(lbl_llm_card_status[i], LV_ALIGN_TOP_LEFT, 0, 26);
 
         lbl_llm_card_hint[i] = lv_label_create(btn_llm_cards[i]);
-        lv_label_set_text(lbl_llm_card_hint[i], "Profile ➔");
+        lv_label_set_text(lbl_llm_card_hint[i], "Profiles >");
         set_label_font(lbl_llm_card_hint[i], &lv_font_montserrat_12, C_CYAN);
         lv_obj_align(lbl_llm_card_hint[i], LV_ALIGN_BOTTOM_RIGHT, 0, 0);
 
@@ -795,7 +795,7 @@ void ui_init(int w, int h)
     lv_obj_add_style(btn_page_prev, &style_btn_pr, LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_add_event_cb(btn_page_prev, btn_page_prev_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_t *lbl_prev = lv_label_create(btn_page_prev);
-    lv_label_set_text(lbl_prev, "◀ PREV");
+    lv_label_set_text(lbl_prev, "< PREV");
     set_label_font(lbl_prev, &lv_font_montserrat_14, C_MUTED);
     lv_obj_center(lbl_prev);
 
@@ -811,7 +811,7 @@ void ui_init(int w, int h)
     lv_obj_add_style(btn_page_next, &style_btn_pr, LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_add_event_cb(btn_page_next, btn_page_next_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_t *lbl_next = lv_label_create(btn_page_next);
-    lv_label_set_text(lbl_next, "NEXT ▶");
+    lv_label_set_text(lbl_next, "NEXT >");
     set_label_font(lbl_next, &lv_font_montserrat_14, C_MUTED);
     lv_obj_center(lbl_next);
 
