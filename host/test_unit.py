@@ -774,14 +774,14 @@ class TestLlmModelsTelemetry(unittest.TestCase):
         ]
         data = build_llm_models(models)
         self.assertEqual(data[0], 2) # count
-        # first model: 16 bytes name + 1 byte is_fav + 1 byte status
+        # first model: 14 bytes name + 1 byte is_fav + 1 byte status
         self.assertEqual(data[1:8], b"gemma4\x00")
-        self.assertEqual(data[17], 1) # is_fav = 1
-        self.assertEqual(data[18], 1) # status = 1 (running)
+        self.assertEqual(data[15], 1) # is_fav = 1
+        self.assertEqual(data[16], 1) # status = 1 (running)
         # second model:
-        self.assertEqual(data[19:25], b"cyber\x00")
-        self.assertEqual(data[35], 0) # is_fav = 0
-        self.assertEqual(data[36], 0) # status = 0 (stopped)
+        self.assertEqual(data[17:23], b"cyber\x00")
+        self.assertEqual(data[31], 0) # is_fav = 0
+        self.assertEqual(data[32], 0) # status = 0 (stopped)
 
 
 if __name__ == "__main__":

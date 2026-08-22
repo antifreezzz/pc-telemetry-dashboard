@@ -1056,18 +1056,18 @@ void ui_set_llm_models(const uint8_t *data, uint16_t len)
 {
     if (!data || len < 1) return;
     uint8_t count = data[0];
-    int avail = (len - 1) / 18;
+    int avail = (len - 1) / 16;
     if (count > avail) count = avail;
     if (count > 16) count = 16;
     g_llm_models_count = count;
 
     const uint8_t *p = data + 1;
     for (int i = 0; i < count; i++) {
-        memcpy(g_llm_models[i].id, p, 16);
-        g_llm_models[i].id[15] = '\0';
-        g_llm_models[i].is_fav = p[16];
-        g_llm_models[i].status = p[17];
-        p += 18;
+        memcpy(g_llm_models[i].id, p, 14);
+        g_llm_models[i].id[14] = '\0';
+        g_llm_models[i].is_fav = p[14];
+        g_llm_models[i].status = p[15];
+        p += 16;
     }
 
     if (ovl_llm && !lv_obj_has_flag(ovl_llm, LV_OBJ_FLAG_HIDDEN)) {

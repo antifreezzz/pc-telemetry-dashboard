@@ -50,7 +50,7 @@ N_NA = 255
 _HOSTNAME_LEN = 24
 _PROC_NAME_LEN = 16
 _MODEL_NAME_LEN = 24
-_MODEL_ID_LEN = 16
+_MODEL_ID_LEN = 14
 
 
 def crc8(data: bytes) -> int:
@@ -155,13 +155,13 @@ def build_llm(status: int, tps: float, model: str) -> bytes:
 def build_llm_models(models: list) -> bytes:
     """Pack models list for ESP32 selector screen.
     
-    Layout: [count:u8] followed by count x [id:16s][is_fav:u8][status:u8]
-    status: 0=stopped, 1=running, 2=starting.
+    Layout: [count:u8] followed by count x [id:14s][is_fav:u8][status:u8]
+    status: 0=stopped, 1=running, 2=starting. Total size <= 225 bytes (fits in u8 TLV len).
     """
     if not models:
         return bytes([0])
     
-    clamped = models[:16]
+    clamped = models[:14]
     data = bytearray([len(clamped)])
     for m in clamped:
         m_id = m.get("id") or m.get("name") or ""
