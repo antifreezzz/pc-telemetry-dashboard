@@ -193,6 +193,26 @@ class LLMMonitor:
         with self._lock:
             return list(self._models)
 
+    def get_model_profiles(self, model_id: str) -> List[Dict[str, Any]]:
+        """Return profiles for model_id."""
+        with self._lock:
+            models = list(self._models)
+        for m in models:
+            if m.get("id") == model_id or m.get("name") == model_id:
+                return list(m.get("profiles") or [])
+        # Fallback fetch if not in cached list yet
+        try:
+            fresh_models = self.client.get_models()
+            if fresh_models:
+                with self._lock:
+                    self._models = fresh_models
+                for m in fresh_models:
+                    if m.get("id") == model_id or m.get("name") == model_id:
+                        return list(m.get("profiles") or [])
+        except Exception:
+            pass
+        return []
+
     def stop_all(self) -> bool:
         """Issue stop-all command via client, update local snapshot immediately."""
         ok = self.client.stop_all()

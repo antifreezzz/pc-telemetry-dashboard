@@ -35,6 +35,7 @@ from host.protocol import (
     FIELD_PROC,
     FIELD_LLM,
     FIELD_LLM_MODELS,
+    FIELD_LLM_PROFILES,
     PROC_KIND_CPU,
     PROC_KIND_RAM,
     PROC_KIND_GPU,
@@ -55,6 +56,7 @@ from host.protocol import (
     build_proc,
     build_llm,
     build_llm_models,
+    build_llm_profiles,
 )
 
 DEFAULT_PORT = "/dev/ttyUSB0"
@@ -102,7 +104,7 @@ def build_frame(snaps: dict, interval: float) -> bytes:
     return pack_frame(fields)
 
 
-def _execute_cmd(cmd, arg, llm_mon: LLMMonitor) -> None:
+def _execute_cmd(cmd, arg, llm_mon: LLMMonitor, ser: serial.Serial) -> None:
     if cmd == CMD_STOP_ALL:
         print("[host] command from ESP32: STOP ALL models", flush=True)
         llm_mon.stop_all()
@@ -117,6 +119,12 @@ def _execute_cmd(cmd, arg, llm_mon: LLMMonitor) -> None:
         else:
             print(f"[host] command from ESP32: START MODEL {arg}", flush=True)
             llm_mon.start_model(arg.strip())
+    elif cmd == "GET_PROFILES" and arg:
+        model_id = arg.strip()
+        print(f"[host] command from ESP32: GET PROFILES for {model_id}", flush=True)
+        profiles = llm_mon.get_model_profiles(model_id)
+        frame = pack_frame([(FIELD_LLM_PROFILES, build_llm_profiles(model_id, profiles))])
+        ser.write(frame)
 
 
 def process_incoming_serial(ser: serial.Serial, rx_buf: bytes, llm_mon: LLMMonitor) -> bytes:
@@ -138,7 +146,7 @@ def process_incoming_serial(ser: serial.Serial, rx_buf: bytes, llm_mon: LLMMonit
         parsed = parse_serial_command(line)
         if parsed is not None:
             cmd, arg = parsed
-            _execute_cmd(cmd, arg, llm_mon)
+            _execute_cmd(cmd, arg, llm_mon, ser)
         elif line.startswith("s:") or line.startswith("FLUSH"):
             pass
         else:
@@ -148,7 +156,7 @@ def process_incoming_serial(ser: serial.Serial, rx_buf: bytes, llm_mon: LLMMonit
         parsed = parse_serial_command(rx_buf)
         if parsed is not None:
             cmd, arg = parsed
-            _execute_cmd(cmd, arg, llm_mon)
+            _execute_cmd(cmd, arg, llm_mon, ser)
             payload_len = rx_buf[1] | (rx_buf[2] << 8)
             frame_len = 4 + payload_len + 1
             rx_buf = rx_buf[frame_len:]

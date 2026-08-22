@@ -102,6 +102,9 @@ static bool handle_payload(const uint8_t *p, uint16_t len)
         case FIELD_LLM_MODELS:
             ui_set_llm_models(&p[pos], flen);
             break;
+        case FIELD_LLM_PROFILES:
+            ui_set_llm_profiles(&p[pos], flen);
+            break;
         default:
             break;  // unknown field id: skip via field_len
         }
@@ -207,5 +210,12 @@ void protocol_send_start_model_profile(const char *model_id, const char *profile
         Serial.printf("CMD:START_MODEL:%s:%s\n", model_id, profile);
     } else {
         Serial.printf("CMD:START_MODEL:%s\n", model_id);
+    }
+}
+
+void protocol_send_get_profiles(const char *model_id)
+{
+    if (model_id && *model_id) {
+        Serial.printf("CMD:GET_PROFILES:%s\n", model_id);
     }
 }

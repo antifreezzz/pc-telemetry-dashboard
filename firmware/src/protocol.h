@@ -14,6 +14,7 @@
 #define FIELD_PROC 0x07
 #define FIELD_LLM 0x08
 #define FIELD_LLM_MODELS 0x09
+#define FIELD_LLM_PROFILES 0x0A
 
 #define PROC_KIND_CPU 0
 #define PROC_KIND_RAM 1
@@ -38,3 +39,4 @@ void protocol_poll();  // call from loop()
 void protocol_send_cmd(uint8_t cmd_id);
 void protocol_send_start_model(const char *model_id);
 void protocol_send_start_model_profile(const char *model_id, const char *profile);
+void protocol_send_get_profiles(const char *model_id);

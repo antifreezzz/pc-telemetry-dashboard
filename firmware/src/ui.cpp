@@ -358,9 +358,14 @@ static void btn_stop_all_cb(lv_event_t *e)
     protocol_send_cmd(CMD_STOP_ALL);
 }
 
-static const char *k_profiles_names[6] = {"default", "fast", "long", "xlong", "max", "vision"};
-static const char *k_profiles_titles[6] = {"default", "fast (Q4)", "long", "xlong", "max", "vision"};
-static const char *k_profiles_descs[6] = {"ctx 4K standard", "ctx 2K (fast)", "ctx 16K (long)", "ctx 32K (ultra)", "ctx 128K (max)", "vision (--mmproj)"};
+struct LlmProfileItem {
+    char name[13];
+    uint32_t ctx_size;
+    char desc[19];
+};
+static LlmProfileItem g_current_profiles[6];
+static int g_current_profiles_count = 0;
+static char g_current_profile_model_id[15] = {0};
 
 static void ovl_open_profiles_modal(int model_idx);
 static void ovl_close_profiles_modal();
@@ -404,9 +409,10 @@ static void btn_prof_stop_cb(lv_event_t *e)
 static void profile_btn_tap_cb(lv_event_t *e)
 {
     int prof_idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (g_selected_model_idx >= 0 && g_selected_model_idx < g_llm_models_count) {
+    if (g_selected_model_idx >= 0 && g_selected_model_idx < g_llm_models_count &&
+        prof_idx >= 0 && prof_idx < g_current_profiles_count) {
         const char *m_id = g_llm_models[g_selected_model_idx].id;
-        const char *prof = k_profiles_names[prof_idx];
+        const char *prof = g_current_profiles[prof_idx].name;
         protocol_send_start_model_profile(m_id, prof);
     }
     ovl_close_profiles_modal();
@@ -416,18 +422,28 @@ static void ovl_open_profiles_modal(int model_idx)
 {
     if (model_idx < 0 || model_idx >= g_llm_models_count || !ovl_llm_profiles) return;
     g_selected_model_idx = model_idx;
+    const char *model_id = g_llm_models[model_idx].id;
 
     char title_buf[48];
-    snprintf(title_buf, sizeof(title_buf), "MODEL: %s", g_llm_models[model_idx].id);
+    snprintf(title_buf, sizeof(title_buf), "MODEL: %s", model_id);
     lv_label_set_text(lbl_prof_model_title, title_buf);
 
     if (g_llm_models[model_idx].status == LLM_STATUS_RUNNING || g_llm_models[model_idx].status == LLM_STATUS_STARTING) {
         lv_obj_clear_flag(btn_prof_stop, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(lbl_prof_subtitle, "Status: RUNNING. Switch profile or Stop:");
+        lv_label_set_text(lbl_prof_subtitle, "Status: RUNNING. Loading profiles...");
     } else {
         lv_obj_add_flag(btn_prof_stop, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(lbl_prof_subtitle, "Select profile to launch:");
+        lv_label_set_text(lbl_prof_subtitle, "Loading profiles...");
     }
+
+    g_current_profiles_count = 0;
+    strncpy(g_current_profile_model_id, model_id, sizeof(g_current_profile_model_id) - 1);
+    g_current_profile_model_id[sizeof(g_current_profile_model_id) - 1] = '\0';
+    for (int i = 0; i < 6; i++) {
+        lv_obj_add_flag(btn_profiles[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    protocol_send_get_profiles(model_id);
 
     lv_obj_clear_flag(ovl_llm_profiles, LV_OBJ_FLAG_HIDDEN);
 }
@@ -888,14 +904,16 @@ void ui_init(int w, int h)
         lv_obj_add_event_cb(btn_profiles[i], profile_btn_tap_cb, LV_EVENT_PRESSED, (void *)(intptr_t)i);
 
         lbl_profiles_title[i] = lv_label_create(btn_profiles[i]);
-        lv_label_set_text(lbl_profiles_title[i], k_profiles_titles[i]);
+        lv_label_set_text(lbl_profiles_title[i], "");
         set_label_font(lbl_profiles_title[i], &lv_font_montserrat_16, C_TEXT);
         lv_obj_align(lbl_profiles_title[i], LV_ALIGN_TOP_LEFT, 0, 0);
 
         lbl_profiles_desc[i] = lv_label_create(btn_profiles[i]);
-        lv_label_set_text(lbl_profiles_desc[i], k_profiles_descs[i]);
+        lv_label_set_text(lbl_profiles_desc[i], "");
         set_label_font(lbl_profiles_desc[i], &lv_font_montserrat_12, C_MUTED);
         lv_obj_align(lbl_profiles_desc[i], LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
+        lv_obj_add_flag(btn_profiles[i], LV_OBJ_FLAG_HIDDEN);
     }
 
     // ---------------- PROC overlay ----------------
@@ -1262,4 +1280,55 @@ void ui_set_llm_models(const uint8_t *data, uint16_t len)
         rebuild_llm_model_buttons();
     }
 }
+
+void ui_set_llm_profiles(const uint8_t *data, uint16_t len)
+{
+    if (!data || len < 15) return;
+    char model_id[15] = {0};
+    memcpy(model_id, data, 14);
+    model_id[14] = '\0';
+    uint8_t count = data[14];
+    if (count > 6) count = 6;
+
+    // Check if this packet matches the currently requested model
+    if (strncmp(model_id, g_current_profile_model_id, 14) != 0) {
+        return;
+    }
+
+    const uint8_t *p = data + 15;
+    int avail = (len - 15) / 34;
+    if (count > avail) count = avail;
+    g_current_profiles_count = count;
+
+    for (int i = 0; i < count; i++) {
+        memcpy(g_current_profiles[i].name, p, 12);
+        g_current_profiles[i].name[12] = '\0';
+        g_current_profiles[i].ctx_size = rd_u32(p + 12);
+        memcpy(g_current_profiles[i].desc, p + 16, 18);
+        g_current_profiles[i].desc[18] = '\0';
+        p += 34;
+    }
+
+    // Refresh profiles overlay if visible
+    if (ovl_llm_profiles && !lv_obj_has_flag(ovl_llm_profiles, LV_OBJ_FLAG_HIDDEN)) {
+        if (g_selected_model_idx >= 0 && g_selected_model_idx < g_llm_models_count &&
+            (g_llm_models[g_selected_model_idx].status == LLM_STATUS_RUNNING ||
+             g_llm_models[g_selected_model_idx].status == LLM_STATUS_STARTING)) {
+            lv_label_set_text(lbl_prof_subtitle, "Status: RUNNING. Switch profile or Stop:");
+        } else {
+            lv_label_set_text(lbl_prof_subtitle, "Select profile to launch:");
+        }
+
+        for (int i = 0; i < 6; i++) {
+            if (i < g_current_profiles_count) {
+                lv_label_set_text(lbl_profiles_title[i], g_current_profiles[i].name);
+                lv_label_set_text(lbl_profiles_desc[i], g_current_profiles[i].desc);
+                lv_obj_clear_flag(btn_profiles[i], LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(btn_profiles[i], LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    }
+}
+
 

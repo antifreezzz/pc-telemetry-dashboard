@@ -30,6 +30,7 @@ FIELD_HEADER = 0x06
 FIELD_PROC = 0x07
 FIELD_LLM = 0x08
 FIELD_LLM_MODELS = 0x09
+FIELD_LLM_PROFILES = 0x0A
 
 PROC_KIND_CPU = 0
 PROC_KIND_RAM = 1
@@ -51,6 +52,8 @@ _HOSTNAME_LEN = 24
 _PROC_NAME_LEN = 16
 _MODEL_NAME_LEN = 24
 _MODEL_ID_LEN = 14
+_PROFILE_NAME_LEN = 12
+_PROFILE_DESC_LEN = 18
 
 
 def crc8(data: bytes) -> int:
@@ -180,6 +183,40 @@ def build_llm_models(models: list) -> bytes:
     return bytes(data)
 
 
+def build_llm_profiles(model_id: str, profiles: list) -> bytes:
+    """Pack model profiles for ESP32 profile picker screen.
+    
+    Layout: [model_id:14s][count:u8] followed by count x [name:12s][ctx_size:u32][desc:18s]
+    Max 6 profiles. Total payload size <= 14 + 1 + 6 * 34 = 219 bytes (fits in u8 TLV len).
+    """
+    data = bytearray(_block(model_id, _MODEL_ID_LEN))
+    if not profiles:
+        data.append(0)
+        return bytes(data)
+
+    clamped = profiles[:6]
+    data.append(len(clamped))
+    for p in clamped:
+        name = p.get("name", "")
+        ctx = int(p.get("ctx_size") or 0)
+        
+        # Build clean short desc, e.g. "ctx 16K q4_0" or "ctx 256K"
+        raw_desc = p.get("description") or ""
+        ctx_k = f"{ctx // 1024}K" if ctx >= 1024 else f"{ctx}"
+        kv = p.get("kv_type") or ""
+        if kv and kv != "f16":
+            short_desc = f"ctx {ctx_k} {kv}"
+        elif p.get("use_vision"):
+            short_desc = f"ctx {ctx_k} vision"
+        else:
+            short_desc = f"ctx {ctx_k}"
+
+        data += _block(name, _PROFILE_NAME_LEN)
+        data += struct.pack("<I", _u32(ctx))
+        data += _block(short_desc, _PROFILE_DESC_LEN)
+    return bytes(data)
+
+
 def build_proc(kind: int, entries: list) -> bytes:
     """entries: list of (value:int, pid:int, name:str).
 
@@ -267,5 +304,8 @@ def parse_serial_command(line_or_data: str | bytes) -> tuple | None:
     elif cmd_upper.startswith("START_MODEL:") or cmd_upper.startswith("START:"):
         _, arg = raw.split(":", 1)
         return "START_MODEL", arg.strip()
+    elif cmd_upper.startswith("GET_PROFILES:") or cmd_upper.startswith("PROFILES:"):
+        _, arg = raw.split(":", 1)
+        return "GET_PROFILES", arg.strip()
 
     return None

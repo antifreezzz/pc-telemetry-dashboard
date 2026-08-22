@@ -784,5 +784,40 @@ class TestLlmModelsTelemetry(unittest.TestCase):
         self.assertEqual(data[32], 0) # status = 0 (stopped)
 
 
+class TestLlmProfilesTelemetry(unittest.TestCase):
+    def test_build_empty_profiles(self):
+        from host.protocol import build_llm_profiles
+        data = build_llm_profiles("qwen9", [])
+        self.assertEqual(data[:14], b"qwen9" + b"\x00" * 9)
+        self.assertEqual(data[14], 0)  # count = 0
+
+    def test_build_profiles_serialization(self):
+        from host.protocol import build_llm_profiles, FIELD_LLM_PROFILES, pack_frame
+        profiles = [
+            {"name": "default", "ctx_size": 262144, "kv_type": "q4_0", "description": "ctx 256K, q4_0 KV"},
+            {"name": "fast", "ctx_size": 8192, "kv_type": "f16", "description": "ctx 8K, f16 KV"},
+            {"name": "vision", "ctx_size": 16384, "use_vision": True},
+        ]
+        data = build_llm_profiles("qwen9", profiles)
+        self.assertEqual(data[:14], b"qwen9" + b"\x00" * 9)
+        self.assertEqual(data[14], 3)  # count = 3
+        # First profile: 12 bytes name, 4 bytes ctx, 18 bytes desc
+        off = 15
+        p1_name = data[off : off + 12].rstrip(b"\x00").decode()
+        p1_ctx = struct.unpack_from("<I", data, off + 12)[0]
+        p1_desc = data[off + 16 : off + 34].rstrip(b"\x00").decode()
+        self.assertEqual(p1_name, "default")
+        self.assertEqual(p1_ctx, 262144)
+        self.assertEqual(p1_desc, "ctx 256K q4_0")
+
+        frame = pack_frame([(FIELD_LLM_PROFILES, data)])
+        self.assertTrue(len(frame) > 0)
+
+    def test_parse_get_profiles_command(self):
+        from host.protocol import parse_serial_command
+        self.assertEqual(parse_serial_command("CMD:GET_PROFILES:qwen9"), ("GET_PROFILES", "qwen9"))
+        self.assertEqual(parse_serial_command("PROFILES:seed"), ("GET_PROFILES", "seed"))
+
+
 if __name__ == "__main__":
     sys.exit(unittest.main())
