@@ -97,6 +97,12 @@ static uint8_t g_llm_status = 255;
 static float g_llm_tps = 0.0f;
 static char g_llm_model[25] = {0};
 
+// ---------- latest load values (for ambient lamp sync) ----------
+static int g_cpu_pct = 0;
+static int g_gpu_pct = 255;  // 255 = N/A (no GPU clients)
+static int g_ram_pct = 0;
+#define AMBIENT_PEAK_PCT 80  // load above this -> alarm red
+
 // ---------- LLM models list & overlay ----------
 struct LlmModelItem {
     char id[15];
@@ -523,7 +529,7 @@ static void slider_bright_cb(lv_event_t *e)
     ledcWrite(0, (int)lv_slider_get_value(sl));
 }
 
-// ---------- periodic refresh (clock / uptime / FPS / LLM ambient pulse) ----------
+// ---------- periodic refresh (clock / uptime / FPS / load ambient sync) ----------
 static void ui_periodic(lv_timer_t *t)
 {
     (void)t;
@@ -545,19 +551,20 @@ static void ui_periodic(lv_timer_t *t)
     snprintf(fbuf, sizeof(fbuf), "FPS %u", fps);
     lv_label_set_text(lbl_fps, fbuf);
 
-    // LLM Ambient Sync handler
-    if (ble_lamp_get_ambient_sync() && g_llm_status == LLM_STATUS_RUNNING) {
+    // System-load Ambient Sync handler
+    if (ble_lamp_get_ambient_sync()) {
         static uint32_t last_ambient_sync = 0;
         if (ms - last_ambient_sync > 1500) {
             last_ambient_sync = ms;
-            if (g_llm_tps > 0.0f) {
-                // Glow bright cyan during active token generation
-                ble_lamp_set_color_rgb(0, 234, 255);
-                ble_lamp_set_brightness(900);
+            int load = g_cpu_pct;
+            if (g_ram_pct > load) load = g_ram_pct;
+            if (g_gpu_pct != 255 && g_gpu_pct > load) load = g_gpu_pct;
+            if (load > AMBIENT_PEAK_PCT) {
+                // Peak load: alarm red, bright
+                ble_lamp_set_color_rgb_bright(255, 60, 40, 900);
             } else {
-                // Calm warm amber when LLM is loaded but idle
-                ble_lamp_set_color_rgb(255, 176, 32);
-                ble_lamp_set_brightness(400);
+                // Calm warm amber while load is below the peak threshold
+                ble_lamp_set_color_rgb_bright(255, 176, 32, 400);
             }
         }
     }
@@ -917,12 +924,12 @@ void ui_init(int w, int h)
     lv_obj_clear_flag(ambient_card, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *lbl_amb_t = lv_label_create(ambient_card);
-    lv_label_set_text(lbl_amb_t, "LLM AMBIENT GLOW SYNC");
+    lv_label_set_text(lbl_amb_t, "LOAD AMBIENT SYNC");
     set_label_font(lbl_amb_t, &lv_font_montserrat_16, C_CYAN);
     lv_obj_align(lbl_amb_t, LV_ALIGN_TOP_LEFT, 0, 0);
 
     lv_obj_t *lbl_amb_d = lv_label_create(ambient_card);
-    lv_label_set_text(lbl_amb_d, "Lamp pulses cyan during token generation");
+    lv_label_set_text(lbl_amb_d, "Warm amber, turns red at peak load");
     set_label_font(lbl_amb_d, &lv_font_montserrat_12, C_MUTED);
     lv_obj_align(lbl_amb_d, LV_ALIGN_BOTTOM_LEFT, 0, -2);
 
@@ -1244,6 +1251,7 @@ void ui_set_cpu_pct(int pct, const uint8_t *cores, int ncores)
     for (int i = 0; i < ncores; i++) g_cores[i] = cores[i];
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
+    g_cpu_pct = pct;
     lv_arc_set_value(arc_cpu, pct);
     char buf[8];
     snprintf(buf, sizeof(buf), "%d%%", pct);
@@ -1253,6 +1261,7 @@ void ui_set_cpu_pct(int pct, const uint8_t *cores, int ncores)
 
 void ui_set_gpu_pct(int pct, int vram_pct, uint32_t vram_used_mb, uint32_t vram_total_mb)
 {
+    g_gpu_pct = pct;  // keep 255 = N/A sentinel
     if (pct == 255) {
         lv_arc_set_value(arc_gpu, 0);
         lv_obj_set_style_arc_color(arc_gpu, C_GRAY, LV_PART_INDICATOR);
@@ -1282,6 +1291,7 @@ void ui_set_ram_pct(int pct, uint32_t used_mb, uint32_t total_mb)
 {
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
+    g_ram_pct = pct;
     lv_bar_set_value(bar_ram, pct, LV_ANIM_OFF);
     char buf[32];
     snprintf(buf, sizeof(buf), "%u / %u MB", used_mb, total_mb);

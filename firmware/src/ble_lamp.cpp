@@ -444,9 +444,38 @@ void ble_lamp_set_cct(uint16_t temp_0_1000)
     enqueue(body, 7);
 }
 
+static void rgb_to_hsv(uint8_t r, uint8_t g, uint8_t b, uint16_t *hu, uint8_t *su);
+static void set_color_hsv(uint16_t hue, uint8_t sat, uint8_t val);
+
 void ble_lamp_set_color_hsv(uint16_t hue, uint8_t sat, uint8_t val)
 {
     Serial.printf("[UI Action] ble_lamp_set_color_hsv(%u,%u,%u)\n", hue, sat, val);
+    set_color_hsv(hue, sat, val);
+}
+
+static void rgb_to_hsv(uint8_t r, uint8_t g, uint8_t b, uint16_t *hu, uint8_t *su)
+{
+    float rf = r / 255.0f;
+    float gf = g / 255.0f;
+    float bf = b / 255.0f;
+    float max_c = max(rf, max(gf, bf));
+    float min_c = min(rf, min(gf, bf));
+    float delta = max_c - min_c;
+
+    float h = 0, s = 0;
+    if (max_c > 0.0f) s = delta / max_c;
+    if (delta > 0.0001f) {
+        if (max_c == rf) h = 60.0f * fmodf(((gf - bf) / delta), 6.0f);
+        else if (max_c == gf) h = 60.0f * (((bf - rf) / delta) + 2.0f);
+        else h = 60.0f * (((rf - gf) / delta) + 4.0f);
+        if (h < 0.0f) h += 360.0f;
+    }
+    *hu = (uint16_t)h;
+    *su = (uint8_t)(s * 100.0f);
+}
+
+static void set_color_hsv(uint16_t hue, uint8_t sat, uint8_t val)
+{
     if (hue > 360) hue = 360;
     if (sat > 100) sat = 100;
     if (val > 100) val = 100;
@@ -468,37 +497,24 @@ void ble_lamp_set_color_rgb(uint8_t r, uint8_t g, uint8_t b)
 {
     Serial.printf("[UI Action] ble_lamp_set_color_rgb(%d,%d,%d)\n", r, g, b);
 
-    float rf = r / 255.0f;
-    float gf = g / 255.0f;
-    float bf = b / 255.0f;
-    float max_c = max(rf, max(gf, bf));
-    float min_c = min(rf, min(gf, bf));
-    float delta = max_c - min_c;
+    uint16_t hu;
+    uint8_t su;
+    rgb_to_hsv(r, g, b, &hu, &su);
+    set_color_hsv(hu, su, 100);
+}
 
-    float h = 0, s = 0, v = max_c;
-    if (max_c > 0.0f) s = delta / max_c;
-    if (delta > 0.0001f) {
-        if (max_c == rf) h = 60.0f * fmodf(((gf - bf) / delta), 6.0f);
-        else if (max_c == gf) h = 60.0f * (((bf - rf) / delta) + 2.0f);
-        else h = 60.0f * (((rf - gf) / delta) + 4.0f);
-        if (h < 0.0f) h += 360.0f;
-    }
+// Single colour command with brightness baked into V: avoids the two-step
+// set_color_rgb + set_brightness flicker (bright flash then dim, twice a tick).
+void ble_lamp_set_color_rgb_bright(uint8_t r, uint8_t g, uint8_t b, uint16_t bright_0_1000)
+{
+    Serial.printf("[UI Action] ble_lamp_set_color_rgb_bright(%d,%d,%d,%d)\n", r, g, b, bright_0_1000);
 
-    uint16_t hu = (uint16_t)h;
-    uint8_t su = (uint8_t)(s * 100.0f);
-    uint8_t vu = (uint8_t)(v * 100.0f);
-    g_color_h = hu;
-    g_color_s = su;
-
-    if (g_mode != 1) {           // mode must precede colour (colour channel)
-        uint8_t m[4];
-        dp_mode(m, 1);
-        enqueue(m, 4);
-        g_mode = 1;
-    }
-    uint8_t body[7];
-    dp_color(body, hu, su, vu);
-    enqueue(body, 7);
+    uint16_t hu;
+    uint8_t su;
+    rgb_to_hsv(r, g, b, &hu, &su);
+    uint8_t vu = bright_0_1000 / 10;
+    if (vu > 100) vu = 100;
+    set_color_hsv(hu, su, vu);
 }
 
 void ble_lamp_set_ambient_sync(bool enabled)
