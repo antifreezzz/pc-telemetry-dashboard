@@ -11,6 +11,29 @@ static lv_disp_draw_buf_t draw_buf;
 static lv_disp_drv_t disp_drv;
 static lv_color_t *buf1 = NULL;
 
+// ---------- screen power (backlight off, tap-to-wake) ----------
+static bool g_screen_off = false;
+static uint8_t g_brightness = 150;  // must match panel default and slider defaults
+static bool g_suppress_until_release = false;
+
+static void backlight_set(uint8_t v)
+{
+    g_brightness = v;
+    ledcWrite(0, v);
+}
+
+static void screen_off()
+{
+    g_screen_off = true;
+    ledcWrite(0, 0);
+}
+
+static void screen_wake()
+{
+    g_screen_off = false;
+    ledcWrite(0, g_brightness);
+}
+
 // ---------- colours ----------
 static const lv_color_t C_BG = lv_color_hex(0x000000);
 static const lv_color_t C_CARD = lv_color_hex(0x14171c);
@@ -333,15 +356,6 @@ void ui_open_llm_menu()
     ovl_open_llm();
 }
 
-static void ovl_llm_toggle_cb(lv_event_t *e)
-{
-    (void)e;
-    if (ovl_llm && lv_obj_has_flag(ovl_llm, LV_OBJ_FLAG_HIDDEN))
-        ovl_open_llm();
-    else
-        ovl_close_llm();
-}
-
 static void ovl_llm_close_cb(lv_event_t *e)
 {
     (void)e;
@@ -526,7 +540,7 @@ static void card_tap_cb(lv_event_t *e)
 static void slider_bright_cb(lv_event_t *e)
 {
     lv_obj_t *sl = lv_event_get_target(e);
-    ledcWrite(0, (int)lv_slider_get_value(sl));
+    backlight_set((uint8_t)lv_slider_get_value(sl));
 }
 
 // ---------- periodic refresh (clock / uptime / FPS / load ambient sync) ----------
@@ -574,11 +588,23 @@ static void indev_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
 {
     int16_t x, y;
     if (touch_read(x, y)) {
-        data->state = LV_INDEV_STATE_PR;
-        data->point.x = x;
-        data->point.y = y;
+        if (g_screen_off) {
+            // Screen is off: any touch wakes it. Consume the whole gesture so
+            // the wake tap doesn't also press the widget underneath.
+            screen_wake();
+            g_suppress_until_release = true;
+            data->state = LV_INDEV_STATE_REL;
+        } else if (g_suppress_until_release) {
+            // finger still down after a wake gesture: keep swallowing
+            data->state = LV_INDEV_STATE_REL;
+        } else {
+            data->state = LV_INDEV_STATE_PR;
+            data->point.x = x;
+            data->point.y = y;
+        }
     } else {
         data->state = LV_INDEV_STATE_REL;
+        g_suppress_until_release = false;
     }
     (void)drv;
 }
@@ -638,16 +664,17 @@ void ui_init(int w, int h)
     set_label_font(btn_lamp_lbl, &lv_font_montserrat_14, C_AMBER);
     lv_obj_center(btn_lamp_lbl);
 
-    // LLM button in header
+    // OFF button in header (replaces the LLM button; the LLM overlay stays
+    // reachable from the LLM card in the bottom strip)
     btn_proc = lv_btn_create(scr);
     lv_obj_set_size(btn_proc, 88, 38);
     lv_obj_align(btn_proc, LV_ALIGN_TOP_RIGHT, -6, 5);
     lv_obj_add_style(btn_proc, &style_btn, LV_PART_MAIN);
     lv_obj_add_style(btn_proc, &style_btn_pr, LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_add_event_cb(btn_proc, ovl_llm_toggle_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(btn_proc, [](lv_event_t *e) { screen_off(); }, LV_EVENT_PRESSED, NULL);
     lv_obj_t *btn_lbl = lv_label_create(btn_proc);
-    lv_label_set_text(btn_lbl, "LLM");
-    set_label_font(btn_lbl, &lv_font_montserrat_14, C_CYAN);
+    lv_label_set_text(btn_lbl, "OFF");
+    set_label_font(btn_lbl, &lv_font_montserrat_14, C_DIM);
     lv_obj_center(btn_lbl);
 
     // header hostname/left area toggles the proc overlay
