@@ -16,6 +16,14 @@ static bool g_screen_off = false;
 static uint8_t g_brightness = 150;  // must match panel default and slider defaults
 static bool g_suppress_until_release = false;
 
+// Wake cooldown: the OFF button fires on PRESSED (finger still down), so an
+// unguarded touch path would instantly re-wake from the same press or a quick
+// double tap. Wake requires both: cooldown elapsed AND a release seen since
+// screen_off (covers holding the button longer than the cooldown).
+#define SCREEN_OFF_COOLDOWN_MS 500
+static uint32_t g_screen_off_ms = 0;
+static bool g_released_since_off = true;
+
 static void backlight_set(uint8_t v)
 {
     g_brightness = v;
@@ -25,6 +33,8 @@ static void backlight_set(uint8_t v)
 static void screen_off()
 {
     g_screen_off = true;
+    g_screen_off_ms = millis();
+    g_released_since_off = false;
     ledcWrite(0, 0);
 }
 
@@ -588,23 +598,27 @@ static void indev_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
 {
     int16_t x, y;
     if (touch_read(x, y)) {
-        if (g_screen_off) {
+        bool wake_ok = (uint32_t)(millis() - g_screen_off_ms) >= SCREEN_OFF_COOLDOWN_MS &&
+                       g_released_since_off;
+        if (g_screen_off && wake_ok) {
             // Screen is off: any touch wakes it. Consume the whole gesture so
             // the wake tap doesn't also press the widget underneath.
             screen_wake();
             g_suppress_until_release = true;
             data->state = LV_INDEV_STATE_REL;
-        } else if (g_suppress_until_release) {
-            // finger still down after a wake gesture: keep swallowing
-            data->state = LV_INDEV_STATE_REL;
-        } else {
+        } else if (!g_screen_off && !g_suppress_until_release) {
             data->state = LV_INDEV_STATE_PR;
             data->point.x = x;
             data->point.y = y;
+        } else {
+            // Screen off but still in cooldown (or finger never lifted after
+            // OFF): swallow. Same for a finger held after a wake gesture.
+            data->state = LV_INDEV_STATE_REL;
         }
     } else {
         data->state = LV_INDEV_STATE_REL;
         g_suppress_until_release = false;
+        g_released_since_off = true;
     }
     (void)drv;
 }
