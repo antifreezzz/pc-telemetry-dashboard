@@ -15,21 +15,25 @@ from host.protocol import (
     LLM_STATUS_OFFLINE,
     LLM_STATUS_RUNNING,
     LLM_STATUS_STARTING,
+    LLM_STATUS_PROMPT_EVAL,
+    LLM_STATUS_GENERATING,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _status_str_to_code(status_str: str, has_active_model: bool = False) -> int:
+def _status_str_to_code(status_str: str, has_active_model: bool = False, phase: str = "") -> int:
     status_lower = (status_str or "").strip().lower()
-    if status_lower == "running":
+    if status_lower == "running" or has_active_model:
+        if phase == "prompt_eval":
+            return LLM_STATUS_PROMPT_EVAL
+        elif phase == "generating":
+            return LLM_STATUS_GENERATING
         return LLM_STATUS_RUNNING
     elif status_lower in ("starting", "loading"):
         return LLM_STATUS_STARTING
     elif status_lower in ("idle", "stopped"):
         return LLM_STATUS_IDLE
-    elif has_active_model:
-        return LLM_STATUS_RUNNING
     return LLM_STATUS_IDLE
 
 
@@ -136,9 +140,25 @@ class LLMMonitor:
         self._status = LLM_STATUS_OFFLINE
         self._tps = 0.0
         self._active_model = ""
+        self._cache_hit_pct = 255
+        self._prompt_tokens = 0
+        self._has_alert = False
         self._models: List[Dict[str, Any]] = []
-        self._last_models_fetch = 0.0
+        self._last_models_fetch = time.time()
         self._running = True
+        try:
+            init_models = self.client.get_models()
+            if init_models:
+                self._models = init_models
+            init_status = self.client.get_status()
+            if init_status:
+                raw_status = init_status.get("status", "idle")
+                active_model = init_status.get("active_model") or ""
+                self._active_model = active_model
+                self._status = _status_str_to_code(raw_status, bool(active_model))
+        except Exception:
+            pass
+
         self._thread = threading.Thread(target=self._worker, daemon=True, name="LLMMonitor")
         self._thread.start()
 
@@ -155,12 +175,21 @@ class LLMMonitor:
                 if status_dict is not None:
                     raw_status = status_dict.get("status", "idle")
                     active_model = status_dict.get("active_model") or ""
-                    code = _status_str_to_code(raw_status, bool(active_model))
+                    llm_metrics = status_dict.get("llm_metrics") or {}
+                    phase = llm_metrics.get("phase") or ""
+                    code = _status_str_to_code(raw_status, bool(active_model), phase=phase)
                     tps = float(status_dict.get("tps") or 0.0)
+                    cache_hit_pct = int(round(float(llm_metrics.get("cache_hit_pct", 255)))) if "cache_hit_pct" in llm_metrics else 255
+                    prompt_tokens = int(llm_metrics.get("prompt_tokens") or 0)
+                    has_alert = bool(llm_metrics.get("has_alert"))
+
                     with self._lock:
                         self._status = code
                         self._tps = max(0.0, tps)
                         self._active_model = active_model
+                        self._cache_hit_pct = cache_hit_pct
+                        self._prompt_tokens = prompt_tokens
+                        self._has_alert = has_alert
                         if models_list is not None:
                             self._models = models_list
                 else:
@@ -168,6 +197,9 @@ class LLMMonitor:
                         self._status = LLM_STATUS_OFFLINE
                         self._tps = 0.0
                         self._active_model = ""
+                        self._cache_hit_pct = 255
+                        self._prompt_tokens = 0
+                        self._has_alert = False
                         if models_list is not None:
                             self._models = models_list
             except Exception as e:
@@ -176,6 +208,9 @@ class LLMMonitor:
                     self._status = LLM_STATUS_OFFLINE
                     self._tps = 0.0
                     self._active_model = ""
+                    self._cache_hit_pct = 255
+                    self._prompt_tokens = 0
+                    self._has_alert = False
 
             # Sleep in small increments for responsive shutdown
             slept = 0.0
@@ -183,10 +218,17 @@ class LLMMonitor:
                 time.sleep(0.05)
                 slept += 0.05
 
-    def snapshot(self) -> Tuple[int, float, str]:
-        """Return (status_code, tps, active_model). Non-blocking and thread-safe."""
+    def snapshot(self) -> Tuple[int, float, str, int, int, bool]:
+        """Return (status_code, tps, active_model, cache_hit_pct, prompt_tokens, has_alert). Non-blocking and thread-safe."""
         with self._lock:
-            return self._status, self._tps, self._active_model
+            return (
+                self._status,
+                self._tps,
+                self._active_model,
+                self._cache_hit_pct,
+                self._prompt_tokens,
+                self._has_alert,
+            )
 
     def models_snapshot(self) -> List[Dict[str, Any]]:
         """Return list of models. Non-blocking and thread-safe."""

@@ -8,3 +8,4 @@ firmware/src/secrets.h
 # Python
 __pycache__/
 *.pyc
+.vix/

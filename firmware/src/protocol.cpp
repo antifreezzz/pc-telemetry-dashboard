@@ -72,9 +72,12 @@ static bool handle_payload(const uint8_t *p, uint16_t len)
         case FIELD_NET:
             ui_set_net(rd_u32(&p[pos]), rd_u32(&p[pos + 4]));
             break;
-        case FIELD_DISK:
-            ui_set_disk(rd_u32(&p[pos]), rd_u32(&p[pos + 4]), p[pos + 8]);
+        case FIELD_DISK: {
+            uint8_t d1 = p[pos + 8];
+            uint8_t d2 = (flen >= 10) ? p[pos + 9] : 255;
+            ui_set_disk(rd_u32(&p[pos]), rd_u32(&p[pos + 4]), d1, d2);
             break;
+        }
         case FIELD_HEADER: {
             uint32_t uptime = rd_u32(&p[pos]);
             uint32_t epoch = rd_u32(&p[pos + 4]);
@@ -92,12 +95,28 @@ static bool handle_payload(const uint8_t *p, uint16_t len)
             if (flen >= 3) {
                 uint8_t status = p[pos];
                 uint16_t tps_x10 = (uint16_t)p[pos + 1] | ((uint16_t)p[pos + 2] << 8);
+                uint8_t cache_hit = 255;
+                uint16_t prompt_k = 0;
+                uint8_t flags = 0;
                 char model_buf[25] = {0};
-                uint8_t str_len = (flen > 3) ? (flen - 3) : 0;
-                if (str_len > 24) str_len = 24;
-                memcpy(model_buf, &p[pos + 3], str_len);
-                model_buf[str_len] = '\0';
-                ui_set_llm(status, tps_x10 / 10.0f, model_buf);
+
+                if (flen >= 7) {
+                    cache_hit = p[pos + 3];
+                    prompt_k = (uint16_t)p[pos + 4] | ((uint16_t)p[pos + 5] << 8);
+                    flags = p[pos + 6];
+                }
+                if (flen > 7) {
+                    uint8_t mlen = flen - 7;
+                    if (mlen > 24) mlen = 24;
+                    memcpy(model_buf, &p[pos + 7], mlen);
+                    model_buf[mlen] = '\0';
+                } else if (flen > 3 && flen < 7) {
+                    uint8_t mlen = flen - 3;
+                    if (mlen > 24) mlen = 24;
+                    memcpy(model_buf, &p[pos + 3], mlen);
+                    model_buf[mlen] = '\0';
+                }
+                ui_set_llm(status, tps_x10 / 10.0f, model_buf, cache_hit, prompt_k, flags);
             }
             break;
         case FIELD_LLM_MODELS:
@@ -106,8 +125,14 @@ static bool handle_payload(const uint8_t *p, uint16_t len)
         case FIELD_LLM_PROFILES:
             ui_set_llm_profiles(&p[pos], flen);
             break;
+        case FIELD_SET_SCREEN:
+            if (flen >= 1) {
+                ui_open_screen(p[pos]);
+            }
+            break;
         default:
-            break;  // unknown field id: skip via field_len
+            // Forward compatibility: skip unknown TLVs
+            break;
         }
         pos += flen;
     }
@@ -118,51 +143,44 @@ void protocol_init()
 {
     Serial.begin(115200);
     st = ST_SYNC;
+    pkt_pos = 0;
+    pkt_len = 0;
+    pkt_count = 0;
+    pkt_bad = 0;
 }
 
 void protocol_poll()
 {
-#ifdef PROTO_DEBUG
-    uint32_t now = millis();
-    if (now - last_debug_ms > 1000)
-    {
-        Serial.print("s:");
-        Serial.print(pkt_count);
-        Serial.print(" r:");
-        Serial.print(pkt_bad);
-        Serial.print(" a:");
-        Serial.print(Serial.available());
-        Serial.println();
-        Serial.flush();
-        last_debug_ms = now;
-    }
-#endif
-    while (Serial.available())
-    {
-        uint8_t b = Serial.read();
-        switch (st)
-        {
+    while (Serial.available() > 0) {
+        uint8_t b = (uint8_t)Serial.read();
+        switch (st) {
         case ST_SYNC:
-            if (b == PROTO_SYNC) st = ST_LEN_LO;
-            else if (b == 0x5A) ble_lamp_run_hue_sweep();
+            if (b == PROTO_SYNC) {
+                st = ST_LEN_LO;
+                pkt_crc = 0;
+            }
             break;
         case ST_LEN_LO:
             pkt_len = b;
             st = ST_LEN_HI;
             break;
         case ST_LEN_HI:
-            pkt_len |= ((uint16_t)b) << 8;
+            pkt_len |= ((uint16_t)b << 8);
             if (pkt_len > PROTO_MAX_PKT) {
+                pkt_bad++;
                 st = ST_SYNC;
-                break;
+            } else {
+                st = ST_TYPE;
             }
-            st = ST_TYPE;
             break;
         case ST_TYPE:
             pkt_type = b;
-            pkt_crc = crc8_step(0, pkt_type);
+            pkt_crc = crc8_step(0, b);
             pkt_pos = 0;
-            st = (pkt_len == 0) ? ST_CSUM : ST_PAYLOAD;
+            if (pkt_len == 0)
+                st = ST_CSUM;
+            else
+                st = ST_PAYLOAD;
             break;
         case ST_PAYLOAD:
             pkt_buf[pkt_pos++] = b;
@@ -171,15 +189,10 @@ void protocol_poll()
                 st = ST_CSUM;
             break;
         case ST_CSUM:
-            if (b == pkt_crc) {
-                if (pkt_type == PROTO_TYPE && handle_payload(pkt_buf, pkt_len)) {
-#ifdef PROTO_DEBUG
-                    Serial.printf("pkt t=%02X len=%u crc ok\n", pkt_type, pkt_len);
-#endif
-                    pkt_count++;
-                } else {
+            if (b == pkt_crc && pkt_type == PROTO_TYPE) {
+                pkt_count++;
+                if (!handle_payload(pkt_buf, pkt_len))
                     pkt_bad++;
-                }
             } else {
                 pkt_bad++;
             }
@@ -187,37 +200,39 @@ void protocol_poll()
             break;
         }
     }
+
+#ifdef PROTO_DEBUG
+    uint32_t now = millis();
+    if (now - last_debug_ms >= 5000) {
+        last_debug_ms = now;
+        Serial.printf("[proto] ok=%u bad=%u\n", pkt_count, pkt_bad);
+    }
+#endif
 }
 
 void protocol_send_cmd(uint8_t cmd_id)
 {
     if (cmd_id == CMD_STOP_ALL) {
-        Serial.println("CMD:STOP_ALL");
+        Serial.println("cmd:STOP_ALL");
     } else if (cmd_id == CMD_START_FAVORITE) {
-        Serial.println("CMD:START_FAVORITE");
+        Serial.println("cmd:START_FAVORITE");
     }
 }
 
 void protocol_send_start_model(const char *model_id)
 {
-    if (model_id && *model_id) {
-        Serial.printf("CMD:START_MODEL:%s\n", model_id);
-    }
+    if (!model_id) return;
+    Serial.printf("cmd:START_MODEL:%s\n", model_id);
 }
 
 void protocol_send_start_model_profile(const char *model_id, const char *profile)
 {
-    if (!model_id || !*model_id) return;
-    if (profile && *profile) {
-        Serial.printf("CMD:START_MODEL:%s:%s\n", model_id, profile);
-    } else {
-        Serial.printf("CMD:START_MODEL:%s\n", model_id);
-    }
+    if (!model_id || !profile) return;
+    Serial.printf("cmd:START_MODEL:%s:%s\n", model_id, profile);
 }
 
 void protocol_send_get_profiles(const char *model_id)
 {
-    if (model_id && *model_id) {
-        Serial.printf("CMD:GET_PROFILES:%s\n", model_id);
-    }
+    if (!model_id) return;
+    Serial.printf("cmd:GET_PROFILES:%s\n", model_id);
 }

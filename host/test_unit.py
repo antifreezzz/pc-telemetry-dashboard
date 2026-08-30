@@ -90,6 +90,8 @@ from host.protocol import (
     LLM_STATUS_IDLE,
     LLM_STATUS_RUNNING,
     LLM_STATUS_STARTING,
+    LLM_STATUS_PROMPT_EVAL,
+    LLM_STATUS_GENERATING,
     LLM_STATUS_OFFLINE,
     CMD_STOP_ALL,
     CMD_START_FAVORITE,
@@ -517,39 +519,52 @@ class TestGpuMonitorPriming(unittest.TestCase):
 
 class TestLlmProtocol(unittest.TestCase):
     def test_build_llm_running(self):
-        data = build_llm(LLM_STATUS_RUNNING, 40.3, "gemma4")
-        self.assertEqual(len(data), 1 + 2 + 24)
-        status, tps_x10 = struct.unpack_from("<BH", data, 0)
+        data = build_llm(LLM_STATUS_RUNNING, 40.3, "gemma4", cache_hit_pct=95, prompt_tokens=8000, has_alert=False)
+        self.assertEqual(len(data), 1 + 2 + 1 + 2 + 1 + 24)
+        status, tps_x10, cache_hit, prompt_k, flags = struct.unpack_from("<BHBHB", data, 0)
         self.assertEqual(status, LLM_STATUS_RUNNING)
         self.assertEqual(tps_x10, 403)
-        self.assertEqual(data[3:].rstrip(b"\x00"), b"gemma4")
+        self.assertEqual(cache_hit, 95)
+        self.assertEqual(prompt_k, 8)
+        self.assertEqual(flags, 0)
+        self.assertEqual(data[7:].rstrip(b"\x00"), b"gemma4")
+
+    def test_build_llm_prompt_eval_alert(self):
+        data = build_llm(LLM_STATUS_PROMPT_EVAL, 0.0, "ornith", cache_hit_pct=11, prompt_tokens=73000, has_alert=True)
+        self.assertEqual(len(data), 31)
+        status, tps_x10, cache_hit, prompt_k, flags = struct.unpack_from("<BHBHB", data, 0)
+        self.assertEqual(status, LLM_STATUS_PROMPT_EVAL)
+        self.assertEqual(cache_hit, 11)
+        self.assertEqual(prompt_k, 73)
+        self.assertEqual(flags, 1)
+        self.assertEqual(data[7:].rstrip(b"\x00"), b"ornith")
 
     def test_build_llm_idle(self):
         data = build_llm(LLM_STATUS_IDLE, 0.0, "")
-        self.assertEqual(len(data), 27)
-        status, tps_x10 = struct.unpack_from("<BH", data, 0)
+        self.assertEqual(len(data), 31)
+        status, tps_x10, cache_hit, prompt_k, flags = struct.unpack_from("<BHBHB", data, 0)
         self.assertEqual(status, LLM_STATUS_IDLE)
         self.assertEqual(tps_x10, 0)
-        self.assertEqual(data[3:], b"\x00" * 24)
+        self.assertEqual(data[7:], b"\x00" * 24)
 
     def test_build_llm_offline(self):
         data = build_llm(LLM_STATUS_OFFLINE, 0.0, "")
-        self.assertEqual(len(data), 27)
-        status, tps_x10 = struct.unpack_from("<BH", data, 0)
+        self.assertEqual(len(data), 31)
+        status, tps_x10, cache_hit, prompt_k, flags = struct.unpack_from("<BHBHB", data, 0)
         self.assertEqual(status, 255)
         self.assertEqual(tps_x10, 0)
 
     def test_build_llm_negative_clamps(self):
         data = build_llm(-1, -5.0, "test")
-        status, tps_x10 = struct.unpack_from("<BH", data, 0)
+        status, tps_x10, cache_hit, prompt_k, flags = struct.unpack_from("<BHBHB", data, 0)
         self.assertEqual(status, 255)
         self.assertEqual(tps_x10, 0)
 
     def test_build_llm_long_model_name_truncated(self):
         long_name = "a" * 100
         data = build_llm(LLM_STATUS_RUNNING, 10.0, long_name)
-        self.assertEqual(len(data), 27)
-        name = data[3:].rstrip(b"\x00")
+        self.assertEqual(len(data), 31)
+        name = data[7:].rstrip(b"\x00")
         self.assertLessEqual(len(name), 23)
 
     def test_frame_round_trip_with_llm(self):
@@ -563,11 +578,11 @@ class TestLlmProtocol(unittest.TestCase):
         llm_blobs = field_data(decoded, FIELD_LLM)
         self.assertEqual(len(llm_blobs), 1)
         blob = llm_blobs[0]
-        self.assertEqual(len(blob), 27)
-        st, tps_x10 = struct.unpack_from("<BH", blob, 0)
+        self.assertEqual(len(blob), 31)
+        st, tps_x10, cache_hit, prompt_k, flags = struct.unpack_from("<BHBHB", blob, 0)
         self.assertEqual(st, LLM_STATUS_RUNNING)
         self.assertEqual(tps_x10, 255)
-        self.assertEqual(blob[3:].rstrip(b"\x00"), b"qwen2.5-coder")
+        self.assertEqual(blob[7:].rstrip(b"\x00"), b"qwen2.5-coder")
 
 
 class TestSerialCommands(unittest.TestCase):
@@ -703,19 +718,28 @@ class TestLlmMonitor(unittest.TestCase):
             "status": "running",
             "active_model": "gemma4",
             "tps": 40.3,
+            "llm_metrics": {
+                "phase": "generating",
+                "cache_hit_pct": 88.5,
+                "prompt_tokens": 12000,
+                "has_alert": False,
+            },
         }
         with mock.patch.object(client, "get_status", return_value=sample):
             mon = LLMMonitor(client=client, poll_interval=0.05)
             try:
                 # wait briefly for worker thread to poll
                 for _ in range(20):
-                    st, tps, model = mon.snapshot()
-                    if st == LLM_STATUS_RUNNING:
+                    st, tps, model, cache_hit, prompt_k, alert = mon.snapshot()
+                    if st == LLM_STATUS_GENERATING:
                         break
                     time.sleep(0.01)
-                self.assertEqual(st, LLM_STATUS_RUNNING)
+                self.assertEqual(st, LLM_STATUS_GENERATING)
                 self.assertAlmostEqual(tps, 40.3)
                 self.assertEqual(model, "gemma4")
+                self.assertEqual(cache_hit, 88)
+                self.assertEqual(prompt_k, 12000)
+                self.assertFalse(alert)
             finally:
                 mon.stop()
 
@@ -724,10 +748,11 @@ class TestLlmMonitor(unittest.TestCase):
         with mock.patch.object(client, "get_status", return_value=None):
             mon = LLMMonitor(client=client, poll_interval=0.05)
             try:
-                st, tps, model = mon.snapshot()
+                st, tps, model, cache_hit, prompt_k, alert = mon.snapshot()
                 self.assertEqual(st, LLM_STATUS_OFFLINE)
                 self.assertEqual(tps, 0.0)
                 self.assertEqual(model, "")
+                self.assertEqual(cache_hit, 255)
             finally:
                 mon.stop()
 
@@ -741,7 +766,7 @@ class TestLlmMonitor(unittest.TestCase):
                 mon._active_model = "test"
             with mock.patch.object(client, "stop_all", return_value=True):
                 self.assertTrue(mon.stop_all())
-            st, tps, model = mon.snapshot()
+            st, tps, model, cache_hit, prompt_k, alert = mon.snapshot()
             self.assertEqual(st, LLM_STATUS_IDLE)
             self.assertEqual(tps, 0.0)
             self.assertEqual(model, "")
@@ -751,13 +776,13 @@ class TestLlmMonitor(unittest.TestCase):
 
 class TestLlmSnapshot(unittest.TestCase):
     def test_none_monitor(self):
-        self.assertEqual(metrics.llm_snapshot(None), (255, 0.0, ""))
+        self.assertEqual(metrics.llm_snapshot(None), (255, 0.0, "", 255, 0, False))
 
     def test_valid_monitor(self):
         class _FakeMon:
             def snapshot(self):
-                return (LLM_STATUS_RUNNING, 42.0, "m")
-        self.assertEqual(metrics.llm_snapshot(_FakeMon()), (LLM_STATUS_RUNNING, 42.0, "m"))
+                return (LLM_STATUS_RUNNING, 42.0, "m", 90, 5, False)
+        self.assertEqual(metrics.llm_snapshot(_FakeMon()), (LLM_STATUS_RUNNING, 42.0, "m", 90, 5, False))
 
 
 class TestLlmModelsTelemetry(unittest.TestCase):

@@ -44,6 +44,8 @@ from host.protocol import (
     LLM_STATUS_IDLE,
     LLM_STATUS_RUNNING,
     LLM_STATUS_STARTING,
+    LLM_STATUS_PROMPT_EVAL,
+    LLM_STATUS_GENERATING,
     LLM_STATUS_OFFLINE,
     CMD_STOP_ALL,
     CMD_START_FAVORITE,
@@ -57,6 +59,7 @@ from host.protocol import (
     build_llm,
     build_llm_models,
     build_llm_profiles,
+    build_set_screen,
 )
 
 DEFAULT_PORT = "/dev/ttyUSB0"
@@ -81,6 +84,9 @@ def open_serial(port: str, baud: int) -> serial.Serial:
             time.sleep(2)
 
 
+g_pending_profiles = None  # (model_id, profiles, expire_time)
+
+
 def build_frame(snaps: dict, interval: float) -> bytes:
     fields = [
         (FIELD_CPU, build_cpu(snaps["cpu"][0], snaps["cpu"][1])),
@@ -101,10 +107,25 @@ def build_frame(snaps: dict, interval: float) -> bytes:
         (FIELD_LLM, build_llm(*snaps["llm"])),
         (FIELD_LLM_MODELS, build_llm_models(snaps["llm_models"])),
     ]
+    if g_pending_profiles and time.time() < g_pending_profiles[2]:
+        m_id, profs, _ = g_pending_profiles
+        fields.append((FIELD_LLM_PROFILES, build_llm_profiles(m_id, profs)))
+
+    if os.path.exists("/tmp/esp32_set_screen"):
+        try:
+            with open("/tmp/esp32_set_screen", "r") as f:
+                sid = int(f.read().strip())
+            os.remove("/tmp/esp32_set_screen")
+            fields.append(build_set_screen(sid))
+            print(f"[host] remote screen switch -> {sid}", flush=True)
+        except Exception as e:
+            print(f"[host] remote screen switch error: {e}", flush=True)
+
     return pack_frame(fields)
 
 
 def _execute_cmd(cmd, arg, llm_mon: LLMMonitor, ser: serial.Serial) -> None:
+    global g_pending_profiles
     if cmd == CMD_STOP_ALL:
         print("[host] command from ESP32: STOP ALL models", flush=True)
         llm_mon.stop_all()
@@ -123,8 +144,11 @@ def _execute_cmd(cmd, arg, llm_mon: LLMMonitor, ser: serial.Serial) -> None:
         model_id = arg.strip()
         print(f"[host] command from ESP32: GET PROFILES for {model_id}", flush=True)
         profiles = llm_mon.get_model_profiles(model_id)
+        print(f"[host] found {len(profiles)} profiles for {model_id}: {[p.get('name') for p in profiles]}", flush=True)
+        g_pending_profiles = (model_id, profiles, time.time() + 10.0)
         frame = pack_frame([(FIELD_LLM_PROFILES, build_llm_profiles(model_id, profiles))])
         ser.write(frame)
+        ser.flush()
 
 
 def process_incoming_serial(ser: serial.Serial, rx_buf: bytes, llm_mon: LLMMonitor) -> bytes:
@@ -219,10 +243,15 @@ def main() -> None:
             ram_pct, ram_used, ram_total = snaps["ram"]
             gpu, vram_pct, vram_used, vram_total = snaps["gpu"]
             rx, tx = snaps["net"]
-            rd, wr, used_pct = snaps["disk"]
-            llm_st, llm_tps, llm_model = snaps["llm"]
+            rd, wr, used_pct, used_pct2 = snaps["disk"]
+            llm_st, llm_tps, llm_model, llm_cache, llm_prompt_k, llm_alert = snaps["llm"]
 
-            if llm_st == LLM_STATUS_RUNNING:
+            if llm_st == LLM_STATUS_PROMPT_EVAL:
+                alert_str = " ALERT" if llm_alert else ""
+                llm_log = f"{llm_model} (PP {llm_prompt_k}k tok, {llm_cache}% hit{alert_str})"
+            elif llm_st == LLM_STATUS_GENERATING:
+                llm_log = f"{llm_model} (TG {llm_tps:.1f} tps, {llm_cache}% hit)"
+            elif llm_st == LLM_STATUS_RUNNING:
                 llm_log = f"{llm_model} ({llm_tps:.1f} tps)"
             elif llm_st == LLM_STATUS_STARTING:
                 llm_log = f"{llm_model} (starting)"
@@ -231,11 +260,12 @@ def main() -> None:
             else:
                 llm_log = "off"
 
+            d2_str = f" d2={used_pct2}%" if used_pct2 <= 100 else ""
             print(
                 f"[host] cpu={cpu:3d}% ram={ram_used:5d}/{ram_total:5d} MB "
                 f"gpu={gpu:3d}% vram={vram_used:4d}/{vram_total:4d} MB "
                 f"net rx={rx:5d} tx={tx:5d} KiB/s "
-                f"disk rd={rd:5d} wr={wr:5d} KiB/s used={used_pct:3d}% "
+                f"disk rd={rd:5d} wr={wr:5d} KiB/s used={used_pct:3d}%{d2_str} "
                 f"llm={llm_log}",
                 flush=True,
             )

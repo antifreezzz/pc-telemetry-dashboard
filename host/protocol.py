@@ -31,6 +31,7 @@ FIELD_PROC = 0x07
 FIELD_LLM = 0x08
 FIELD_LLM_MODELS = 0x09
 FIELD_LLM_PROFILES = 0x0A
+FIELD_SET_SCREEN = 0x0B
 
 PROC_KIND_CPU = 0
 PROC_KIND_RAM = 1
@@ -41,6 +42,8 @@ PROC_KIND_DISK_WR = 4
 LLM_STATUS_IDLE = 0
 LLM_STATUS_RUNNING = 1
 LLM_STATUS_STARTING = 2
+LLM_STATUS_PROMPT_EVAL = 3
+LLM_STATUS_GENERATING = 4
 LLM_STATUS_OFFLINE = 255
 
 CMD_STOP_ALL = 0x01
@@ -137,7 +140,9 @@ def build_net(rx_kibs: int, tx_kibs: int) -> bytes:
     return struct.pack("<II", _u32(rx_kibs), _u32(tx_kibs))
 
 
-def build_disk(rd_kibs: int, wr_kibs: int, used_pct: int) -> bytes:
+def build_disk(rd_kibs: int, wr_kibs: int, used_pct: int, used_pct2: int = 255) -> bytes:
+    if used_pct2 != 255:
+        return struct.pack("<IIBB", _u32(rd_kibs), _u32(wr_kibs), pack_pct(used_pct), pack_pct(used_pct2))
     return struct.pack("<IIB", _u32(rd_kibs), _u32(wr_kibs), pack_pct(used_pct))
 
 
@@ -145,14 +150,25 @@ def build_header(uptime_s: int, epoch_s: int, hostname: str) -> bytes:
     return struct.pack("<II", _u32(uptime_s), _u32(epoch_s)) + _block(hostname, _HOSTNAME_LEN)
 
 
-def build_llm(status: int, tps: float, model: str) -> bytes:
-    """Pack LLM telemetry: [status:u8][tps_x10:u16][model_name:24s]."""
+def build_llm(
+    status: int,
+    tps: float,
+    model: str,
+    cache_hit_pct: int = 255,
+    prompt_tokens: int = 0,
+    has_alert: bool = False,
+) -> bytes:
+    """Pack LLM telemetry: [status:u8][tps_x10:u16][cache_hit_pct:u8][prompt_k:u16][flags:u8][model_name:24s]."""
     if status < 0 or status == LLM_STATUS_OFFLINE:
         st = LLM_STATUS_OFFLINE
     else:
         st = min(255, max(0, int(status)))
     tps_x10 = _u16(int(round(max(0.0, float(tps)) * 10)))
-    return struct.pack("<BH", st, tps_x10) + _block(model, _MODEL_NAME_LEN)
+    cache_hit = pack_pct(cache_hit_pct, n_na=255)
+    prompt_k = _u16(min(65535, prompt_tokens // 1000 if prompt_tokens >= 1000 else (1 if prompt_tokens > 0 else 0)))
+    flags = 1 if has_alert else 0
+    return struct.pack("<BHBHB", st, tps_x10, cache_hit, prompt_k, flags) + _block(model, _MODEL_NAME_LEN)
+
 
 
 def build_llm_models(models: list) -> bytes:
@@ -231,6 +247,11 @@ def build_proc(kind: int, entries: list) -> bytes:
         payload += struct.pack("<H", _u16(pid))
         payload += _block(name, _PROC_NAME_LEN)
     return bytes(payload)
+
+
+def build_set_screen(screen_id: int) -> tuple[int, bytes]:
+    """Build a TLV entry to programmatically switch screens/modals on ESP32."""
+    return FIELD_SET_SCREEN, bytes([screen_id & 0xFF])
 
 
 def pack_frame(fields: list) -> bytes:

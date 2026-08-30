@@ -64,14 +64,28 @@ def net_snapshot(prev, now, interval: float) -> tuple:
 
 
 def disk_snapshot(prev, now, interval: float) -> tuple:
-    """rd/wr KiB/s (aggregate) and root filesystem used pct."""
+    """rd/wr KiB/s (aggregate) and used pct for primary and secondary disks."""
     rd = 0
     wr = 0
     if prev is not None and now is not None and now.read_bytes >= 0:
         rd = int(max(0, (now.read_bytes - prev.read_bytes) / interval / 1024))
         wr = int(max(0, (now.write_bytes - prev.write_bytes) / interval / 1024))
-    used_pct = int(psutil.disk_usage("/").percent)
-    return rd, wr, used_pct
+    used_pct1 = int(psutil.disk_usage("/").percent)
+    used_pct2 = 255
+    try:
+        candidates = []
+        for p in psutil.disk_partitions(all=False):
+            if p.mountpoint == "/" or p.fstype in ("squashfs", "vfat", "tmpfs", "efivarfs") or "loop" in p.device:
+                continue
+            u = psutil.disk_usage(p.mountpoint)
+            if u.total > 10 * (1024**3):
+                candidates.append((u.total, int(u.percent)))
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            used_pct2 = candidates[0][1]
+    except Exception:
+        pass
+    return rd, wr, used_pct1, used_pct2
 
 
 def header_snapshot() -> tuple:
@@ -176,13 +190,13 @@ class ProcIoTracker:
         return [(rd, wr, pid, name) for _tot, rd, wr, pid, name in raw[:n]]
 
 
-def llm_snapshot(monitor: Any) -> Tuple[int, float, str]:
+def llm_snapshot(monitor: Any) -> Tuple[int, float, str, int, int, bool]:
     if monitor is None:
-        return LLM_STATUS_OFFLINE, 0.0, ""
+        return LLM_STATUS_OFFLINE, 0.0, "", 255, 0, False
     try:
         return monitor.snapshot()
     except Exception:
-        return LLM_STATUS_OFFLINE, 0.0, ""
+        return LLM_STATUS_OFFLINE, 0.0, "", 255, 0, False
 
 
 def llm_models_snapshot(monitor: Any) -> list:
