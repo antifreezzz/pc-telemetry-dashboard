@@ -12,7 +12,7 @@
 <a name="english"></a>
 ## 🇬🇧 English
 
-A desktop hardware monitoring dashboard and smart controller running on the 4.0\" square **Guition ESP32-4848S040** board (ESP32-S3-WROOM-1, 480x480 RGB ST7701 display, GT911 capacitive touch). The Linux host sends system telemetry over UART0 via CH340 using a robust binary TLV protocol, while the ESP32 renders a **Clean Modern Flat Dark UI** with LVGL 8.3.
+A desktop hardware monitoring dashboard and smart controller running on the 4.0" square **Guition ESP32-4848S040** board (ESP32-S3-WROOM-1, 480x480 RGB ST7701 display, GT911 capacitive touch). The Linux host sends system telemetry over UART0 via CH340 using a robust binary TLV protocol, while the ESP32 renders a **Clean Modern Flat Dark UI** with LVGL 8.3.
 
 ### ✨ Key Features
 
@@ -90,7 +90,7 @@ systemctl --user start esp32-display.service
 <a name="русский"></a>
 ## 🇷🇺 Русский
 
-Аппаратный монитор системной нагрузки ПК и пульт умного дома на базе 4.0\" квадратного экрана **Guition ESP32-4848S040** (ESP32-S3-WROOM-1, 480x480 RGB ST7701, емкостный тач GT911). Хост под управлением Linux собирает метрики и транслирует их по UART0 через CH340 с помощью бинарного TLV-протокола, а ESP32 отрисовывает интерфейс в стиле **Clean Flat Dark UI** на библиотеке LVGL 8.3.
+Аппаратный монитор системной нагрузки ПК и пульт умного дома на базе 4.0" квадратного экрана **Guition ESP32-4848S040** (ESP32-S3-WROOM-1, 480x480 RGB ST7701, емкостный тач GT911). Хост под управлением Linux собирает метрики и транслирует их по UART0 через CH340 с помощью бинарного TLV-протокола, а ESP32 отрисовывает интерфейс в стиле **Clean Flat Dark UI** на библиотеке LVGL 8.3.
 
 ### ✨ Основные возможности
 
