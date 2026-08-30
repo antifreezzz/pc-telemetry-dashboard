@@ -1,459 +1,165 @@
-# ESP32-4848S040 PC Dashboard
+# ESP32-4848S040 PC Telemetry Dashboard & Smart Hub
 
-Дисплей системной нагрузки на 4" экране Guition ESP32-4848S040
-(ESP32-S3-WROOM-1, квадратный 480x480 RGB ST7701, тач GT911). Хост (Linux) шлёт
-метрики CPU/RAM/GPU/NET по UART0 через CH340, ESP32 рисует их через LVGL.
+[![PlatformIO](https://img.shields.io/badge/PlatformIO-ESP32--S3-orange.svg)](https://platformio.org/)
+[![LVGL](https://img.shields.io/badge/LVGL-v8.3-blue.svg)](https://lvgl.io/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-brightgreen.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-> ВАЖНО (аппаратная модель): USB-C на этой плате подключён через **CH340**
-> к **UART0 (GPIO 43/44)**, а НЕ к нативному USB-CDC (GPIO 19/20). Поэтому
-> прошивка обязана использовать UART0 (`ARDUINO_USB_CDC_ON_BOOT=0`), а
-> тач GT911 сидит на I2C0 **SDA=19 / SCL=45**. Ранее в README эта модель
-> была описана неверно (нативный CDC), что и вызывало «нет данных» и
-> порчу экрана (GPIO 15/7 = RGB B3/B4, а не тач).
+[English](#english) | [Русский](#русский)
 
-```
-host/                # Python: сбор метрик + serial TX
-firmware/            # Arduino: panel + LVGL + protocol parser
-```
+---
 
-## Архитектура
+<a name="english"></a>
+## 🇬🇧 English
 
-```
-+-------------+   UART0@115200   +-------------+
-| Linux host  | <------------->  | ESP32-S3    |
-| host.py     |  CH340           |   firmware  |
-| psutil      |  /dev/ttyUSB0    |   LVGL UI   |
-+-------------+    GPIO 43/44    +-------------+
-```
+A desktop hardware monitoring dashboard and smart controller running on the 4.0\" square **Guition ESP32-4848S040** board (ESP32-S3-WROOM-1, 480x480 RGB ST7701 display, GT911 capacitive touch). The Linux host sends system telemetry over UART0 via CH340 using a robust binary TLV protocol, while the ESP32 renders a **Clean Modern Flat Dark UI** with LVGL 8.3.
 
-### Стек
+### ✨ Key Features
 
-- **Хост**: Python 3, `psutil`, `pyserial`.
-  Модули: `host/protocol.py` (батч-фрейм + CRC), `host/metrics.py` (сбор),
-  `host/gpu_monitor.py` (GPU из DRM fdinfo, без root).
-- **Прошивка**: PlatformIO + arduino-esp32 2.x (espressif32@^6.5.0), LVGL 8.3,
-  Arduino_GFX 1.5.0.
+1. **Main Dashboard**:
+   - **CPU**: Load arc gauge, current percentage, and per-core utilization bars.
+   - **GPU**: Load arc gauge, VRAM usage bar, and `used / total` memory (via DRM `fdinfo`, zero root required).
+   - **RAM**: Memory usage bar with detailed `used / total` MB.
+   - **Dual Disk Telemetry**: Independent percentages for primary and secondary drives (`D1: 55%  D2: 60%`), real-time read and write speeds.
+   - **Network**: Live dual-series RX/TX traffic graph.
+   - **Header**: Live digital clock, host uptime, `LAMP` and `OFF` toggles.
 
-### Протокол (host -> device) v2
+2. **AI / LLM Model Manager & Profile Picker**:
+   - Live integration with `llmcontrol` HTTP API.
+   - 6-card paginated grid of available local LLMs with status badges (`IDLE`, `STARTING`, `RUNNING`, tokens/sec `TPS`).
+   - Profile selection modal for each model (context window `16k/64k/256k`, quantization `q4_0/q8_0/f16`, FlashAttention, vision).
+   - Global `STOP ALL` and per-model stop controls.
 
-> **Breaking change от v1.** Новый формат (батч-фрейм + CRC-8) реализован
-> одновременно в хосте и прошивке одним PR. Старый хост/старая прошивка
-> между собой НЕ совместимы — обновляй обе стороны вместе.
+3. **Smart Lamp Control (BLE Tuya Beacon)**:
+   - Direct Bluetooth Low Energy (BLE) control of Tuya-compatible RGBCW lamps without clouds, hubs, or apps.
+   - Power switch, 6 fast color presets (*Cyan*, *Mint*, *Amber*, *Purple*, *Ruby*, *Daylight*), smooth Brightness & Warmth/CCT sliders.
+   - **Ambient Sync**: Dynamically adapts lamp hue and intensity based on peak PC load (`Max(CPU, GPU, RAM)`).
 
-Один батч-фрейм на тик (вместо 4 одиночных пакетов v1), всё начинается с `0xAA`:
+4. **Top Processes & System Overlays**:
+   - Tap any card (CPU, RAM, GPU, Disk) to open a detailed breakdown of top resource-consuming processes.
+   - Global display brightness slider (PWM control via LEDC).
+   - Instant touch wake-up with debounce protection.
 
-```
-[0xAA] [len_lo] [len_hi] [type=0xF1] [TLV...] [crc8]
-```
+---
 
-`len` — длина только `payload` (uint16 LE). `crc8` — CRC-8/ATM (poly 0x07,
-init 0x00, без инверсии) по байтам `[type, payload...]`. Мифрагмент/неверная
-CRC → кадр отбрасывается, приёмник ресинкается на `0xAA`.
+### 🛠 Hardware Specifications (Guition ESP32-4848S040)
 
-`payload` = последовательность TLV `[field_id:u8][field_len:u8][data...]`.
-Неизвестные `field_id` пропускаются по `field_len` — протокол экстенсибилен
-без версионирования. Все multi-byte — little-endian. Юниты скоростей — **kB/s**
-(КиБ/с; делим дельту байт на 1024, а не на 1000).
+> **Important**: The USB-C connector on this board is wired through a **CH340 USB-UART bridge to UART0 (GPIO 43/44)**, NOT to native USB-CDC (GPIO 19/20). The GT911 touch controller is connected to I2C0 (**SDA=19 / SCL=45**).
 
-| id | Поле   | Data                                        |
-|----|--------|---------------------------------------------|
-| 0x01 | CPU   | u8 pct, u8[Ncores] per-core                 |
-| 0x02 | RAM   | u8 pct, u32 used_mb, u32 total_mb           |
-| 0x03 | GPU   | u8 pct (255=N/A), u8 vram_pct, u32 vram_used_mb, u32 vram_total_mb |
-| 0x04 | NET   | u32 rx_kB/s, u32 tx_kB/s                    |
-| 0x05 | DISK  | u32 rd_kB/s, u32 wr_kB/s, u8 used_pct       |
-| 0x06 | HEADER| u32 uptime_s, u32 epoch_s, char hostname[24] |
-| 0x07 | PROC  | u8 kind, u8 count, ×[u32 value, u16 pid, char name[16]] |
+| Signal | Pin / GPIO | Notes |
+|---|---|---|
+| **RGB LCD Data** | R0..R4: 11, 12, 13, 14, 0<br>G0..G5: 8, 20, 3, 46, 9, 10<br>B0..B4: 4, 5, 6, 7, 15 | 16-bit RGB565 bus |
+| **RGB Control** | HSYNC: 16, VSYNC: 17, DE: 18, PCLK: 21 | PCLK @ 16 MHz, vsync 10/8/20 |
+| **LCD SPI Init** | CS: 39, SCK: 48, MOSI: 47 | 3-wire 9-bit SPI for ST7701 init |
+| **Touch (GT911)** | SDA: 19, SCL: 45 | I2C0 bus |
+| **UART0** | TX: 43, RX: 44 | 115200 baud via CH340 |
+| **Backlight** | GPIO 38 | PWM dimming (LEDC) |
 
-`PROC` (0x07) обобщённый: несёт раскладку по процессам для параметра `kind`,
-отсортированную по убыванию `value`. Может присутствовать в кадре несколько раз
-(по разу на каждый kind):
+---
 
-| kind | Параметр        | Единицы value            |
-|------|-----------------|--------------------------|
-| 0    | CPU             | %                        |
-| 1    | RAM             | RSS MB                   |
-| 2    | GPU             | VRAM MB                  |
-| 3    | DISK rd         | KiB/s (в порядке `rd+wr`) |
-| 4    | DISK wr         | KiB/s (тот же порядок)    |
+### 🚀 Getting Started
 
-Эталонный энкодер: `host/protocol.py` (функции `pack_frame`, `build_*`).
-Парсер прошивки: `firmware/src/protocol.cpp` (state machine
-SYNC -> LEN_LO -> LEN_HI -> TYPE -> PAYLOAD -> CSUM). Поле CRC реализовано,
-`host/protocol.py::crc8` и `firmware crc8_step` байт-в-байт совместимы
-(check: `crc8(\\xF1) == 0xD9`).
-
-## Сборка и запуск
-
-### Хост
+#### 1. Host Agent Setup (Linux)
 
 ```bash
 cd host/
 pip install -r requirements.txt
-python3 host.py           # шлёт батч в /dev/ttyUSB0 @115200
+
+# Run manually
+python3 host.py --port /dev/ttyUSB0 --baud 115200
 ```
 
-Аргументы: `--port`, `--baud`, `--interval` (по умолчанию 0.5 с).
+To run as a persistent systemd user service:
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now esp32-display.service
+```
 
-### GPU (DDR-drive, без root)
-
-ГП работает через DRM `fdinfo`: фоновый поток `host/gpu_monitor.py::IntelGpuMonitor`
-раз в 0.5 с сканирует `/proc/<pid>/fdinfo/<fd>` на i915-клиентов и берёт:
-- **занятость VRAM**: сумма `drm-resident-local0` по уникальным (pid, drm-client-id);
-  total — prefetchable PCI MEM BAR из `/sys/bus/pci/devices/0000:03:00.0/resource`;
-- **загрузку %**: дельты `drm-engine-render` + `drm-engine-compute` (Render/3D
-  класс) между тиками, нормированные на реальное время, clamp 0..100.
-
-Привилегии НЕ нужны (в отличие от `intel_gpu_top`, которому требуется
-`cap_perfmon`). Если GPU недоступен или клиентов нет — пакет уходит с `pct=255`
-(N/A), прошивка показывает «--», а не 0%.
-
-### Прошивка
-
-Хост-бэкенд живёт в systemd-юните пользователя `esp32-display.service`
-(`Restart=always`) и держит `/dev/ttyUSB0`. Перед заливкой прошивки юнит
-обязан быть остановлен, иначе esptool не откроет порт.
+#### 2. Firmware Compilation & Flashing
 
 ```bash
+# Stop backend to free /dev/ttyUSB0
 systemctl --user stop esp32-display.service
 cd firmware/
-pio run -t upload         # собирает и заливает в /dev/ttyUSB0
+pio run -t upload
 systemctl --user start esp32-display.service
 ```
 
-**Нельзя тушить бэкенд через `kill <pid>` / `pkill -f host.py`:** из-за
-`Restart=always` процесс вернётся через 5 секунд и снова схватит порт,
-уже посреди заливки. Только `systemctl --user stop/start`. Проверка:
-`systemctl --user is-active esp32-display.service`.
+---
 
-Одновременно с бэкендом подключаться к `/dev/ttyUSB0` нельзя - порт один.
-Для отладки ESP32 временно останови юнит (см. выше) и сними логи
-`cat /dev/ttyUSB0` (протокол раз в секунду печатает `s:N a:M`).
+<a name="русский"></a>
+## 🇷🇺 Русский
 
-## Текущее состояние (что работает / что нет)
+Аппаратный монитор системной нагрузки ПК и пульт умного дома на базе 4.0\" квадратного экрана **Guition ESP32-4848S040** (ESP32-S3-WROOM-1, 480x480 RGB ST7701, емкостный тач GT911). Хост под управлением Linux собирает метрики и транслирует их по UART0 через CH340 с помощью бинарного TLV-протокола, а ESP32 отрисовывает интерфейс в стиле **Clean Flat Dark UI** на библиотеке LVGL 8.3.
 
-### Работает
+### ✨ Основные возможности
 
-- Поднимается экран, виден тёмный UI (карточки CPU/GPU/RAM/NET + шапка + DISK).
-- `host.py` шлёт один батч-фрейм -> ESP32 парсит TLV + CRC -> `ui_set_*`
-  обновляет виджеты.
-- **Header**: hostname, аптайм `up D HH:MM:SS`, живые часы `HH:MM:SS`
-  (из epoch хоста + локальный счётчик), FPS (по фактическим флашам), кнопки
-  LAMP и OFF (выключение экрана).
-- **Screen OFF** (кнопка OFF в шапке): гасит backlight до 0, тач остаётся
-  активным. Любой тап в любой точке экрана пробуждает его и восстанавливает
-  предыдущую яркость; жест пробуждения не кликает виджет под пальцем. Есть
-  анти-даблтап: после гашения тач будит только спустя 500 мс и при условии,
-  что палец с кнопки OFF уже отпущен (иначе то же нажатие или быстрый второй
-  тап мгновенно возвращали подсветку). LLM
-  больше не в шапке: оверлей открывается с нижней LLM-карточки.
-- **CPU**: arc + % внутри + мини-бары по ядрам.
-- **GPU**: arc + % (+ «--» и серый arc при N/A) + VRAM-бар и `VRAM x / y MB`.
-- **RAM**: bar + `used / total MB`. **DISK**: полоса used% + `rd/wr MB/s`.
-- **NET**: чарт с двумя сериями RX/TX (cyan/green), Y 0..512 kB/s.
-- **PROC overlay** (фуллскрин): раскладка по процессам, сортировка по убыванию
-  параметра; открывается тапом по hostname (top CPU), а также тапом по карточке
-  **CPU** (top CPU), **RAM** (top RSS MB), **GPU** (top VRAM MB) или **DISK**
-  (rd/wr KiB/s раздельно). Внутри — слайдер яркости backlight (ledc, 0..255).
-  NET-карточка не кликается (per-process трафик не собираем).
-- **Touch GT911** подключён к LVGL (indev pointer) — кнопки/слайдер работают.
-- LVGL-буфер — **single buffer** в PSRAM. Двойной буфер (2×480×200×2) на RGB-
-  панели без tearing-control давал мерцание (панель сканирует свой фреймбуфер
-  синхронно, swap-втораго буфера не происходит) — поэтому не используем.
-  Размер буфера: `w*200` (≈192 КБ).
-- Подсветка через ШИМ на GPIO 38.
-- **Smart Lamp** (BLE): модалка на экране управляет Tuya-BLE-лампочкой через
-  connectable-рекламу с XXTEA-зашифрованной командой. Кнопка LAMP в шапке ->
-  POWER, 6 цветных пресетов, яркость (режим-зависимая), warmth, ambient-синк.
-  **Ambient Sync**: лампа отслеживает `Max(CPU%, GPU%, RAM%)` — тёплый янтарный
-  при нагрузке ≤80%, красный (яркий) при пике >80%; GPU N/A (255) пропускается.
-  Команда цвета с яркостью уходит одной DP-посылкой (без ступенчатого мигания).
-  См. секцию «Smart Lamp (BLE)» ниже.
+1. **Главный экран (Dashboard)**:
+   - **CPU**: Круговая шкала загрузки, проценты и полосы по каждому ядру.
+   - **GPU**: Круговая шкала, занятость VRAM и память `занято / всего` (через DRM `fdinfo`, права root не требуются).
+   - **RAM**: Индикатор памяти и значения `занято / всего` в МБ.
+   - **Два диска**: Раздельные проценты для основного и второго накопителя (`D1: 55%  D2: 60%`), реальные скорости чтения и записи.
+   - **Сеть**: График сетевой активности (RX/TX) в реальном времени.
+   - **Шапка**: Живые цифровые часы, аптайм ПК, кнопки `LAMP` и `OFF` (выключение экрана).
 
-### Не работает / TODO
+2. **Управление LLM и выбор профилей**:
+   - Прямая интеграция с локальным API `llmcontrol`.
+   - Сетка из 6 карточек моделей с пагинацией и статусами (`IDLE`, `STARTING`, `RUNNING`, токены/сек `TPS`).
+   - Модальное окно выбора профилей запуска (размер контекста `16k/64k/256k`, квантование `q4_0/q8_0/f16`, FlashAttention, vision).
+   - Кнопка аварийного выключения `STOP ALL` и остановка выбранной модели.
 
-- **Таймзона часов**: часы в шапке идут по UTC (epoch без офсета). Если нужен
-  локальный пояс — передавать офсет в HEADER-поле (нет в протоколе пока).
-- NET-чарт жёстко ограничен 512 kB/s (clamp); при стабильно больших
-  скоростях масштаб стоит сделать динамическим.
-- **Цвета после ухода от 0x21**: инверсия убрана (reference-конфиг работает
-  без неё). Если на твоём экземпляре появятся полосы — вернуть `0x21` в
-  `panel.cpp` и компенсировать палитру в `ui.cpp`.
+3. **Умная лампа (BLE Tuya Beacon)**:
+   - Прямое управление Tuya-BLE лампой без шлюзов, облаков и приложений.
+   - Питание, 6 быстрых цветовых пресетов (*Cyan*, *Mint*, *Amber*, *Purple*, *Ruby*, *Daylight*), ползунки яркости и цветовой температуры.
+   - **Ambient Sync**: Адаптация цвета лампы под пиковую нагрузку ПК (`Max(CPU, GPU, RAM)`).
 
-## Smart Lamp (BLE)
+4. **Процессы и управление экраном**:
+   - Тап по карточке (CPU, RAM, GPU, Disk) открывает список топ-процессов по соответствующему ресурсу.
+   - Настройка яркости подсветки через ШИМ на GPIO 38.
+   - Мгновенное пробуждение экрана по тапу с защитой от случайных нажатий.
 
-Управление Tuya-BLE-лампой RGBCW (Phyplus-класс, «Tuya Beacon») напрямую с
-ESP32, без шлюза и без приложения. Весь код — `firmware/src/ble_lamp.{h,cpp}`.
+---
 
-### Модель
+### 📦 Протокол передачи данных (v2)
 
-Лампа **receive-only**: GATT-соединение она не принимает, только сканирует
-BLE-рекламу. Управление одностороннее: контроллер шлёт **connectable ADV_IND**
-(31 байт), в поле 128-bit Service UUID лежит XXTEA-шифротекст команды. Ответа
-нет. Лампа фильтрует команды по Local Name (имя контроллера, которым её
-привязывали) и по счётчику anti-replay.
-
-Реклама-команда (3 AD-структуры):
+Кадр упаковывается в бинарный пакет с контрольной суммой CRC-8/ATM:
 
 ```
-02 01 01              Flags
-0B 09 <name≤8>        Complete Local Name = имя привязки
-11 07 <ct[16]>        Complete 128-bit Service UUID = шифротекст
+[0xAA] [len_lo] [len_hi] [type=0xF1] [TLV_1] [TLV_2] ... [crc8]
 ```
 
-Plaintext команды (16 байт):
+- **0xAA** — синхробайт.
+- **len_lo, len_hi** — 16-битная длина полезной нагрузки (little-endian).
+- **type (0xF1)** — маркер фрейма телеметрии.
+- **TLV** — последовательность полей: `[field_id: u8][field_len: u8][field_data...]`.
+- **crc8** — контрольная сумма CRC-8/ATM по байтам `[type, payload...]`.
 
+| ID | Поле | Описание |
+|---|---|---|
+| `0x01` | **CPU** | Загрузка CPU (%) и массив загрузки по ядрам |
+| `0x02` | **RAM** | Процент, занятая и общая память в МБ |
+| `0x03` | **GPU** | Загрузка GPU (%), занятость VRAM (%) и память в МБ |
+| `0x04` | **NET** | Скорости приёма и передачи (KiB/s) |
+| `0x05` | **DISK** | Скорость чтения/записи (KiB/s), процент D1, процент D2 |
+| `0x06` | **HEADER** | Аптайм (с), unix epoch (с), имя хоста |
+| `0x07` | **PROC** | Топ процессов по типам (CPU, RAM, GPU, Disk Rd, Disk Wr) |
+| `0x08` | **LLM** | Статус активной модели, скорость генерации TPS, имя модели |
+| `0x09` | **LLM_MODELS** | Список доступных моделей для сетки |
+| `0x0A` | **LLM_PROFILES** | Профили запуска выбранной модели (контекст, тип) |
+| `0x0B` | **SET_SCREEN** | Удалённое переключение экранов через хост |
+
+---
+
+### 🧪 Тестирование
+
+Проект покрыт автоматическими тестами энкодера/декодера протокола, сборщика метрик и клиента LLM:
+
+```bash
+pytest host/test_unit.py
 ```
-[0]   0x07      opcode DOWNLOAD_DP
-[1]   0x2C      маркер фрейма (у этой лампы 0x2C, НЕ 0x24 как в ESPHome)
-[2:5] seq       24-bit anti-replay, big-endian
-[5:14] body     DP-данные
-[14]  CRC-8     poly 0x07, init 0x00, над [1:14]
-[15]  0x00      pad
-```
 
-DP (компактный формат `id | type | len | value`):
+---
 
-| DP | Назначение | Тип | Значение |
-|----|-----------|-----|----------|
-| 0x01 | Power | 0x01 bool | 00/01 |
-| 0x02 | Режим | 0x04 enum | 00=white, 01=colour (шлётся ДО яркости/цвета) |
-| 0x03 | Яркость | 0x02 value | 10..1000 BE |
-| 0x04 | Цвет.температура | 0x02 value | 0(warm)..1000(cool) BE |
-| 0x0b | Цвет HSV | 0x00 raw | hue 0..360 BE16, sat 0..100, val 0..100 |
-| 0x0c | Сцена | 0x00 raw | (приложение шлёт, мы не используем) |
+### 📄 Лицензия
 
-Крипта: **XXTEA**, big-endian слова, 19 раундов, ключ = `localKey` как 16
-**ASCII**-байт (НЕ hex-декод). Самотест при загрузке сверяет шифротекст с
-известным вектором (`crypto_self_test`), ключ задан в `LOCAL_KEY_ASCII`.
-
-### Конфиг (константы в `ble_lamp.cpp`)
-
-- `TARGET_MAC` — MAC лампы.
-- `LOCAL_KEY_ASCII` — local key из привязки (через снифф/Frida).
-- `CTRL_NAME` — BT-имя контроллера привязки (≤8 символов, иначе не влезет
-  в 31 байт вместе с Flags и UUID).
-- `LAMP_SEED_SEQ` — запасной сид счётчика (первый бут без NVS).
-
-### Anti-replay
-
-Лампа принимает только `seq` чуть выше своего счётчика; большие прыжки
-отбрасывает. Поэтому:
-
-- Счётчик хранится в **NVS** и восстанавливается после ребута.
-- Фоновый скан наблюдает команды телефона (та же connectable-реклама):
-  если приложение двигало счётчик вперёд — ESP32 ресинхронизируется.
-- Если NVS пуст (первый бут) — короткий bootstrap-свип `seed+1..seed+0x40`.
-
-Диагностика: raw-байт `0x5A` в UART запускает hue-свип (0..330 шаг 30).
-
-### Нюансы UX
-
-- **Яркость режим-зависима**: в цветном режиме яркость меняет V цвета (hue/sat
-  сохраняются), в белом — DP3. Иначе яркость уводит лампу в жёлтый.
-- **Одна DP-команда на цвет**: не слать `set_color_rgb` + `set_brightness`
-  отдельно (две DP-посылки подряд -> лампа мигает ярким->тусклым каждый тик).
-  Для сцены с фиксированной яркостью есть `ble_lamp_set_color_rgb_bright()` —
-  одна DP с уже применённым V.
-- **Hue-шкала лампы стандартная**: красный = hue 0 (проверено свипом).
-- Слайдеры шлют команду по `LV_EVENT_RELEASED` (не на каждый пиксель), чтобы
-  не забивать очередь; dwell команды 300 мс (скан останавливается на время
-  эмита).
-
-## История отладки (что чинили и почему)
-
-В этой секции — весь путь, чтобы не повторять ошибки.
-
-### Проблема 1: ESP32 не получал данные
-
-**Симптом:** на экране значения 0/0/0/0, host.py печатает что шлёт пакеты.
-
-**Корень (после проверки схемы и reference-проектов):** модель железа в
-этой секции была неверной.
-- USB-C на плате подключён через **CH340** к **UART0 (GPIO 43/44)**, а не к
-  нативному USB-CDC (GPIO 19/20). Нативный CDC на Linux виден как
-  `/dev/ttyACM0`, а у нас `/dev/ttyUSB0` — это USB-UART мост (CH340).
-- GT911 висит на I2C0 **SDA=19 / SCL=45**, а не на 15/7. GPIO 15 и 7 — это
-  RGB B4/B3 (см. таблицу ниже), `Wire.begin(15, 7)` перехватывал эти биты
-  у панели и ломал картинку.
-- Прошивка с `ARDUINO_USB_CDC_ON_BOOT=1` слушала нативный USB-CDC на
-  GPIO 19/20, а хост писал в CH340 -> UART0 (GPIO 43/44). Данные не
-  доходили.
-
-**Фикс:** `platformio.ini` -> `ARDUINO_USB_MODE=0`, `ARDUINO_USB_CDC_ON_BOOT=0`
-(Serial = UART0, GPIO 43/44); `touch.h` -> TP_SDA=19, TP_SCL=45. Этот
-«фикс 1» из старой версии README (тач на 15/7 + нативный CDC) и был
-источником обеих проблем.
-
-### Проблема 2: жёлтый экран вместо нормального UI
-
-**Симптом:** LVGL рисует UI, но цвета искажены — фон жёлтый вместо тёмного.
-
-**Корень:** наложенные друг на друга ошибки: неправильные vsync-тайминги
-(1/1/1 вместо 10/8/20) и I2C на RGB-битах (15/7) плюс команда инверсии
-`0x21` в init-последовательности ST7701.
-
-**После фикса:** убраны 0x21, vsync приведён к 10/8/20, тач убран с
-RGB-битов. Цвета должны быть штатными. Если на конкретном экземпляре
-панель снова рассинхронизируется без 0x21 — см. Проблему 4, вернуть 0x21
-и скомпенсировать палитру в `ui.cpp`.
-
-### Проблема 3: ребут-луп после "фикса" распиновки
-
-**Симптом:** загрузка -> чёрный экран -> щелчки реле по RS485 (внешние
-реле на шине) -> опять загрузка.
-
-**Корень:** я подсунул распиновку Waveshare ESP32-S3-Touch-LCD-4 V1,
-которая не совпадает с Guition 4848S040. `esp_lcd_new_rgb_panel()` падал
-на невалидной конфигурации -> `ESP_ERROR_CHECK()` вызывал `abort()` ->
-чип ребутался. UART0 boot ROM спамил символы -> SP3485 дёргал RS485 ->
-внешние реле щёлкали.
-
-**Фикс:** взял верифицированный конфиг из
-https://github.com/aquaElectronics/esp32-4848s040-st7701 (PlatformIO
-reference project именно под эту плату). Распиновка RGB/SPI/backlight
-совпадает пин-в-пин с тем, что было в **оригинальном** `panel.cpp`
-(то есть изначальный код был правильным, я его зря менял).
-
-### Проблема 4: синий экран + бегущие полосы
-
-**Симптом:** панель ожила, показывает UI, но фон синий и горизонтальные
-полосы ползут по экрану.
-
-**Корень 1:** vsync-тайминг — я по ошибке установил
-`vsync_front/pulse/back = 1/1/1` (а должно быть `10/8/20` по
-верифицированному конфигу). Панель не могла засинхронизировать кадр.
-
-**Корень 2:** при правильном тайминге (10/8/20) полосы всё равно
-ползли (в другую сторону), и добавление `0x21` (display inversion)
-стабилизировало панель, но инвертировало цвета.
-
-**Текущее решение:** vsync приведён к 10/8/20, `0x21` убран — reference-
-конфиги (aquaElectronics, ESPHome `invert_colors: False`) работают без
-инверсии. Если на твоём экземпляре панель рассинхронизируется без 0x21,
-верни команду `WRITE_COMMAND_8, 0x21,` в `panel.cpp` и инвертируй палитру
-в `ui.cpp` (иначе фон будет жёлтым).
-
-### Проблема 5: PCLK 12 МГц vs 16 МГц
-
-В верифицированном aquaElectronics конфиге передан параметр
-`prefer_speed = 12000` (вероятно, опечатка — должно быть `12000000`).
-Твой оригинальный код вызывал `gfx->begin(16000000)` — 16 МГц.
-Оставил 16 МГц, с ним панель работает стабильнее (проверено вживую).
-
-### Проблема 6: ребут-луп после подключения тача к LVGL
-
-**Симптом:** экран живой, но UI горит ~0.2 с, затем ~1 с чёрный экран,
-по кругу. Снять логи UART (`host/test.py`) показало детерминированный
-`Guru Meditation (LoadProhibited)` сразу после `Protocol init done`, каждый
-цикл загрузки.
-
-**Корень:** `lv_indev_drv_t indev_drv;` объявлялся на стеке в `ui_init`, а
-`lv_indev_drv_register()` хранит **указатель** на переданную структуру (в
-LVGL обязательно `static`/file-scope). После возврата из `ui_init` указатель
-висел: первый же тик indev-таймера читал `driver->disp->prev_scr` по мусорному
-адресу -> LoadProhibited -> ребут. Раньше тач не кормил LVGL, поэтому падать
-было негде.
-
-**Фикс:** `static lv_indev_drv_t indev_drv;` в `ui.cpp`. Дизассемблер
-подтверждал фолт ровно на `l32i a2, a2, 20` (disp->prev_scr).
-
-### Проблема 7: лампочка не реагировала на экран Smart Lamp
-
-**Симптом:** UI шлёт команды (`[UI Action]` + `[BLE] >>> BROADCASTING`), но
-лампа молчит.
-
-**Корень — стопка независимых ошибок:**
-
-1. **Транспорт**: команду нельзя слать как non-connectable manufacturer-data
-   broadcast. Лампа принимает только **connectable ADV_IND** с шифротекстом в
-   128-bit Service UUID. Non-connectable игнорируется молча, даже с верным
-   payload.
-2. **Маркер фрейма**: у этой лампы в plaintext маркер **0x2C**, а не 0x24
-   (как в ESPHome-эталоне). При неверном маркере лампа молчит.
-3. **Счётчик anti-replay**: лампа принимает seq только чуть выше своего
-   счётчика. Свип 2..65 не попадал — приложение успело укатить счётчик до
-   ~0x13900. Счётчик вытащили из перехваченных команд телефона.
-4. **Company ID в парсере статуса**: on-air байты `07 D0` (=0xD007 LE), а я
-   искал `D0 07`. Из-за этого не считывался статус-бикон.
-5. **Переполнение буфера**: имя `ESP32Desk` (9 симв.) давало рекламу 32 байта
-   > 31 -> stack smash -> ребут на каждой команде. Имя обязано быть ≤8.
-6. **Яркость в цветном режиме**: наивная яркость шлёт mode=0 (white) -> лампа
-   уходит в жёлтый. В цветном режиме яркость = V цвета.
-7. **Hue пресетов**: красный это hue 0, а не 8 (приложение на колесе слало 8,
-   что рендерится как красно-оранжевый).
-
-**Как чинили:** сверили реализацию с перехваченными командами телефона
-(дешифровали их ключом через `forge.py` из
-`tuya-beacon-esphome`) и с hue-свипом лампы. XXTEA с ASCII-ключом и CRC-8
-оказались верными с самого начала — проблема была в транспорте/фрейминге/счётчике.
-
-## GPIO маппинг (Guition ESP32-4848S040)
-
-Из верифицированного конфига aquaElectronics (PlatformIO reference).
-**Не менять без проверки схемы** — разные клоны 4848S040 имеют разный
-маппинг, и неправильный выбор вызывает ребут-луп через `ESP_ERROR_CHECK`.
-
-| Сигнал        | GPIO |
-|---------------|------|
-| HSYNC         | 16   |
-| VSYNC         | 17   |
-| DE            | 18   |
-| PCLK          | 21   |
-| R0..R4        | 11, 12, 13, 14, 0 |
-| G0..G5        | 8, 20, 3, 46, 9, 10 |
-| B0..B4        | 4, 5, 6, 7, 15 |
-| SPI CS (LCD)  | 39   |
-| SPI SCK (LCD) | 48   |
-| SPI MOSI (LCD)| 47   |
-| Touch SDA     | 19 (I2C0) |
-| Touch SCL     | 45 (I2C0, strapping) |
-| UART0 TX/RX   | 43, 44 (CH340 -> USB-C; там же внешний RS485 через SP3485) |
-| Backlight     | 38 (PWM) |
-| Relays        | 1, 2, 40 |
-| SD CS/MISO    | 42, 41 |
-
-**Не трогать:** GPIO 15/7 — это RGB B3/B4, НЕ тач. GPIO 19/20 — это
-тач SDA и RGB G1, НЕ нативный USB.
-
-RGB-тайминги (hsync_polarity=1, vsync_polarity=1, pclk_active_neg=0):
-
-- HSYNC: front=10, pulse=8, back=50
-- VSYNC: front=10, pulse=8, back=20
-- PCLK: 16 МГц
-
-## Что проверить, если что-то не работает
-
-1. **Экран чёрный + реле щёлкают** — скорее всего неправильный GPIO
-   в `panel.cpp`. `ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(...))` падает
-   -> abort -> ребут. Сверься с таблицей выше.
-
-2. **Полосы бегут по экрану** — тайминги в конструкторе `Arduino_ESP32RGBPanel`.
-   Либо vsync/porch, либо PCLK. Попробуй 16 МГц.
-
-3. **Данные не приходят** — убедись, что Serial = UART0 (GPIO 43/44),
-   то есть в `platformio.ini` стоит `-DARDUINO_USB_CDC_ON_BOOT=0`
-   (`ARDUINO_USB_MODE=0`). Нативный CDC (GPIO 19/20) до USB-C не доходит —
-   там CH340. Хост: `python3 host.py --port /dev/ttyUSB0 --baud 115200`.
-   Проверка приёма: собрать с `-DPROTO_DEBUG` (прошивка печатает `s:N r:M a:K`
-   — принято/отброшено/в буфере — и `pkt t=F1 len=.. crc ok` раз в секунду)
-   и смотреть через `host/test.py` (шлёт батч-фреймы через `host/protocol.py`).
-
-4. **Полосы / рассинхрон панели** — тайминги vsync/porch в `panel.cpp`
-   (должно быть 10/8/20). Если рассинхрон остаётся — вернуть
-   `WRITE_COMMAND_8, 0x21,` (инверсия, но стабильная картинка) и
-   инвертировать палитру в `ui.cpp`.
-
-## Ссылки
-
-- https://github.com/aquaElectronics/esp32-4848s040-st7701 — PlatformIO
-  reference project с верифицированной распиновкой и таймингами.
-- https://github.com/ha5dzs/Guition-ESP32-4848S040-platformio — проект под
-  эту же плату: подтверждает CH340 на UART0 и тач на SDA=19/SCL=45.
-- https://devices.esphome.io/devices/Guition-ESP32-S3-4848S040/ — конфиг
-  ESPHome: тач 19/45, `invert_colors: False`, тайминги 10/8/20.
-- https://homeding.github.io/boards/esp32s3/panel-4848S040.htm — описание
-  похожей платы (jczn1688/Waving), **распиновка R/B переставлена** по
-  сравнению с Guition.
-- https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-4 — НЕ эта плата,
-  у Waveshare свой (тоже другой) маппинг.
+MIT License. См. [LICENSE](LICENSE) для подробностей.
