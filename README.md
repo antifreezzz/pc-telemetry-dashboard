@@ -69,12 +69,36 @@ A desktop hardware monitoring dashboard and smart controller running on the 4.0"
 
 ---
 
-### 💡 Smart Lamp (BLE Tuya Beacon) Architecture
+### 💡 Smart Lamp Setup Guide (Tuya BLE Beacon)
 
-The lamp is controlled via **one-way connectable `ADV_IND` advertisements** (Tuya Beacon protocol):
-- **Payload**: 16-byte plaintext with frame marker `0x2C`, 24-bit anti-replay `seq` counter, DP data, and CRC-8.
-- **Encryption**: Big-endian **XXTEA** (19 rounds) using the 16-byte ASCII local key inside the 128-bit Service UUID.
-- **Anti-Replay Counter**: Sequence numbers are persisted to ESP32 NVS flash across reboots.
+Tuya BLE Beacon lamps (Phyplus chipsets) operate in **receive-only** mode via encrypted `ADV_IND` Bluetooth packets without establishing a permanent GATT connection.
+
+#### Step 1: Obtain Lamp Credentials (`localKey` & `MAC`)
+1. Add the lamp to the **Smart Life** or **Tuya Smart** mobile app.
+2. Retrieve the 16-character ASCII `local_key` and MAC address using either:
+   - **Tuya Developer Platform ([iot.tuya.com](https://iot.tuya.com))**: *Cloud* → *API Explorer* → *Smart Home Device System* → *Device Control* → *Get Device Details*.
+   - **TinyTuya CLI**: Run `tinytuya wizard` in Python to export device keys from your Tuya cloud account.
+
+#### Step 2: Configure `secrets.h`
+Create your private credentials file from the template:
+```bash
+cp firmware/src/secrets.example.h firmware/src/secrets.h
+```
+
+Edit `firmware/src/secrets.h`:
+```cpp
+#pragma once
+#include <stdint.h>
+
+#define TUYA_LAMP_MAC   {0xDC, 0x23, 0x4F, 0xAA, 0xBB, 0xCC} // Lamp BT MAC
+#define TUYA_LOCAL_KEY  "0123456789ABCDEF"                   // 16-char ASCII localKey
+#define TUYA_CTRL_NAME  "SmartCtr"                           // Controller name (<= 8 chars)
+```
+
+#### Protocol Specification:
+- **Encryption**: Big-endian **XXTEA** (19 rounds) with the 16-byte ASCII key inside the 128-bit Service UUID.
+- **Packet Structure**: 16-byte plaintext with frame marker `0x2C`, 24-bit anti-replay `seq` counter, DP data, and CRC-8.
+- **Anti-Replay**: Sequence counter is automatically persisted to ESP32 NVS flash.
 
 | DP ID | Function | Type | Values |
 |---|---|---|---|
@@ -146,7 +170,7 @@ systemctl --user start esp32-display.service
    - Кнопка аварийного выключения `STOP ALL` и остановка выбранной модели.
 
 3. **Умная лампа (BLE Tuya Beacon)**:
-   - Прямое управление Tuya-BLE лампой без шлюзов, облаков и приложений.
+   - Прямое управление Tuya-BLE лампой без шлюзов, облаков и сторонних приложений.
    - Питание, 6 быстрых цветовых пресетов (*Cyan*, *Mint*, *Amber*, *Purple*, *Ruby*, *Daylight*), ползунки яркости и цветовой температуры.
    - **Ambient Sync**: Адаптация цвета лампы под пиковую нагрузку ПК (`Max(CPU, GPU, RAM)`).
 
@@ -173,6 +197,47 @@ systemctl --user start esp32-display.service
 | **Подсветка** | `GPIO 38` | ШИМ яркости через LEDC (0..255) |
 | **Реле на плате** | `GPIO 1, 2, 40` | Силовые выходы |
 | **MicroSD** | `CS: 42, MISO: 41` | Шина SPI |
+
+---
+
+### 💡 Инструкция по подключению умной лампы (Tuya BLE)
+
+Лампы стандарта Tuya Beacon (на чипах Phyplus) работают в режиме **receive-only** — они не держат постоянное GATT-соединение, а слушают шифрованные пакеты рекламы `ADV_IND`.
+
+#### Шаг 1: Получение ключей лампы (`localKey` и `MAC`)
+1. Привяжите лампу в мобильном приложении **Smart Life** или **Tuya Smart**.
+2. Получите 16-значный ASCII-ключ `local_key` и Bluetooth MAC-адрес одним из способов:
+   - **Tuya IoT Platform ([iot.tuya.com](https://iot.tuya.com))**: Раздел *Cloud* → *API Explorer* → *Smart Home Device System* → *Device Control* → *Get Device Details*.
+   - **Утилита TinyTuya**: Запустите мастер `tinytuya wizard` в Python для выгрузки ключей привязанных устройств из аккаунта Tuya.
+
+#### Шаг 2: Настройка `secrets.h`
+Создайте файл секретов из шаблона:
+```bash
+cp firmware/src/secrets.example.h firmware/src/secrets.h
+```
+
+Заполните ваши данные в `firmware/src/secrets.h`:
+```cpp
+#pragma once
+#include <stdint.h>
+
+#define TUYA_LAMP_MAC   {0xDC, 0x23, 0x4F, 0xAA, 0xBB, 0xCC} // MAC-адрес лампы
+#define TUYA_LOCAL_KEY  "0123456789ABCDEF"                   // 16-значный ASCII localKey
+#define TUYA_CTRL_NAME  "SmartCtr"                           // Имя контроллера (<= 8 симв.)
+```
+
+#### Спецификация протокола:
+- **Шифрование**: **XXTEA** (19 раундов, big-endian) с 16-байтным ASCII-ключом в поле 128-bit Service UUID.
+- **Структура пакета**: 16 байт plaintext (маркер фрейма `0x2C`, 24-битный счётчик `seq`, тело DP-команды, CRC-8).
+- **Счётчик Anti-Replay**: Значение `seq` автоматически сохраняется в энергонезависимую память (NVS) ESP32 при каждой команде.
+
+| DP ID | Функция | Тип | Значения |
+|---|---|---|---|
+| `0x01` | Питание | Boolean | `0x00` (Выкл) / `0x01` (Вкл) |
+| `0x02` | Режим | Enum | `0x00` (Белый) / `0x01` (Цветной) |
+| `0x03` | Яркость | Value | `10..1000` (Big-Endian) |
+| `0x04` | Температура / CCT | Value | `0` (Тёплый) .. `1000` (Холодный) |
+| `0x0B` | Цвет HSV | Raw | `Hue (0..360 BE16), Sat (0..100), Val (0..100)` |
 
 ---
 
