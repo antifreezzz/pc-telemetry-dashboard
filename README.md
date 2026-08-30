@@ -14,6 +14,14 @@
 
 A desktop hardware monitoring dashboard and smart controller running on the 4.0" square **Guition ESP32-4848S040** board (ESP32-S3-WROOM-1, 480x480 RGB ST7701 display, GT911 capacitive touch). The Linux host sends system telemetry over UART0 via CH340 using a robust binary TLV protocol, while the ESP32 renders a **Clean Modern Flat Dark UI** with LVGL 8.3.
 
+```
++-------------+   UART0@115200 (CH340)   +----------------------------+
+| Linux Host  | <----------------------> | ESP32-S3 (4848S040)        |
+| host.py     |   Binary Frame + CRC8    |   LVGL 8.3 Flat Dark UI    |
+| psutil/DRM  |   /dev/ttyUSB0 (GPIO 43/44) |   480x480 ST7701 + GT911   |
++-------------+                          +----------------------------+
+```
+
 ### ✨ Key Features
 
 1. **Main Dashboard**:
@@ -42,18 +50,39 @@ A desktop hardware monitoring dashboard and smart controller running on the 4.0"
 
 ---
 
-### 🛠 Hardware Specifications (Guition ESP32-4848S040)
+### 🛠 Complete Hardware Pinout (Guition ESP32-4848S040)
 
 > **Important**: The USB-C connector on this board is wired through a **CH340 USB-UART bridge to UART0 (GPIO 43/44)**, NOT to native USB-CDC (GPIO 19/20). The GT911 touch controller is connected to I2C0 (**SDA=19 / SCL=45**).
 
-| Signal | Pin / GPIO | Notes |
+| Function | Pin / GPIO | Description |
 |---|---|---|
-| **RGB LCD Data** | R0..R4: 11, 12, 13, 14, 0<br>G0..G5: 8, 20, 3, 46, 9, 10<br>B0..B4: 4, 5, 6, 7, 15 | 16-bit RGB565 bus |
-| **RGB Control** | HSYNC: 16, VSYNC: 17, DE: 18, PCLK: 21 | PCLK @ 16 MHz, vsync 10/8/20 |
-| **LCD SPI Init** | CS: 39, SCK: 48, MOSI: 47 | 3-wire 9-bit SPI for ST7701 init |
-| **Touch (GT911)** | SDA: 19, SCL: 45 | I2C0 bus |
-| **UART0** | TX: 43, RX: 44 | 115200 baud via CH340 |
-| **Backlight** | GPIO 38 | PWM dimming (LEDC) |
+| **RGB LCD R0..R4** | `11, 12, 13, 14, 0` | Red bus (5 bits) |
+| **RGB LCD G0..G5** | `8, 20, 3, 46, 9, 10` | Green bus (6 bits) |
+| **RGB LCD B0..B4** | `4, 5, 6, 7, 15` | Blue bus (5 bits) |
+| **RGB Sync / Clock** | `HSYNC: 16, VSYNC: 17, DE: 18, PCLK: 21` | PCLK @ 16 MHz, HSYNC 10/8/50, VSYNC 10/8/20 |
+| **LCD SPI Init** | `CS: 39, SCK: 48, MOSI: 47` | 3-wire 9-bit SPI for ST7701 initialization |
+| **Touch (GT911)** | `SDA: 19, SCL: 45` | I2C0 bus |
+| **UART0** | `TX: 43, RX: 44` | 115200 baud via CH340 & SP3485 RS485 |
+| **Backlight** | `GPIO 38` | PWM dimming via LEDC (0..255) |
+| **Onboard Relays** | `GPIO 1, 2, 40` | Switch channels |
+| **MicroSD Slot** | `CS: 42, MISO: 41` | SPI bus |
+
+---
+
+### 💡 Smart Lamp (BLE Tuya Beacon) Architecture
+
+The lamp is controlled via **one-way connectable `ADV_IND` advertisements** (Tuya Beacon protocol):
+- **Payload**: 16-byte plaintext with frame marker `0x2C`, 24-bit anti-replay `seq` counter, DP data, and CRC-8.
+- **Encryption**: Big-endian **XXTEA** (19 rounds) using the 16-byte ASCII local key inside the 128-bit Service UUID.
+- **Anti-Replay Counter**: Sequence numbers are persisted to ESP32 NVS flash across reboots.
+
+| DP ID | Function | Type | Values |
+|---|---|---|---|
+| `0x01` | Power | Boolean | `0x00` (Off) / `0x01` (On) |
+| `0x02` | Mode | Enum | `0x00` (White) / `0x01` (Colour) |
+| `0x03` | Brightness | Value | `10..1000` (Big-Endian) |
+| `0x04` | Warmth / CCT | Value | `0` (Warm) .. `1000` (Cool) |
+| `0x0B` | Color HSV | Raw | `Hue (0..360 BE16), Sat (0..100), Val (0..100)` |
 
 ---
 
@@ -92,6 +121,14 @@ systemctl --user start esp32-display.service
 
 Аппаратный монитор системной нагрузки ПК и пульт умного дома на базе 4.0" квадратного экрана **Guition ESP32-4848S040** (ESP32-S3-WROOM-1, 480x480 RGB ST7701, емкостный тач GT911). Хост под управлением Linux собирает метрики и транслирует их по UART0 через CH340 с помощью бинарного TLV-протокола, а ESP32 отрисовывает интерфейс в стиле **Clean Flat Dark UI** на библиотеке LVGL 8.3.
 
+```
++-------------+   UART0@115200 (CH340)   +----------------------------+
+| Linux Хост  | <----------------------> | ESP32-S3 (4848S040)        |
+| host.py     |   Батч-кадр + CRC8       |   LVGL 8.3 Flat Dark UI    |
+| psutil/DRM  |   /dev/ttyUSB0 (GPIO 43/44) |   480x480 ST7701 + GT911   |
++-------------+                          +----------------------------+
+```
+
 ### ✨ Основные возможности
 
 1. **Главный экран (Dashboard)**:
@@ -117,6 +154,25 @@ systemctl --user start esp32-display.service
    - Тап по карточке (CPU, RAM, GPU, Disk) открывает список топ-процессов по соответствующему ресурсу.
    - Настройка яркости подсветки через ШИМ на GPIO 38.
    - Мгновенное пробуждение экрана по тапу с защитой от случайных нажатий.
+
+---
+
+### 🛠 Полная распиновка (Guition ESP32-4848S040)
+
+> **Важно**: USB-C порт подключён через микросхему **CH340 к UART0 (GPIO 43/44)**, а НЕ к нативному USB-CDC (GPIO 19/20). Тач GT911 подключён к шине I2C0 (**SDA=19 / SCL=45**).
+
+| Назначение | Пин / GPIO | Описание |
+|---|---|---|
+| **RGB LCD R0..R4** | `11, 12, 13, 14, 0` | Линии красного цвета (5 бит) |
+| **RGB LCD G0..G5** | `8, 20, 3, 46, 9, 10` | Линии зелёного цвета (6 бит) |
+| **RGB LCD B0..B4** | `4, 5, 6, 7, 15` | Линии синего цвета (5 бит) |
+| **Синхронизация RGB** | `HSYNC: 16, VSYNC: 17, DE: 18, PCLK: 21` | PCLK 16 МГц, HSYNC 10/8/50, VSYNC 10/8/20 |
+| **Инициализация LCD (SPI)** | `CS: 39, SCK: 48, MOSI: 47` | 3-проводной 9-битный SPI для ST7701 |
+| **Тачскрин (GT911)** | `SDA: 19, SCL: 45` | Шина I2C0 |
+| **UART0** | `TX: 43, RX: 44` | 115200 бод (CH340 и RS485 на SP3485) |
+| **Подсветка** | `GPIO 38` | ШИМ яркости через LEDC (0..255) |
+| **Реле на плате** | `GPIO 1, 2, 40` | Силовые выходы |
+| **MicroSD** | `CS: 42, MISO: 41` | Шина SPI |
 
 ---
 
